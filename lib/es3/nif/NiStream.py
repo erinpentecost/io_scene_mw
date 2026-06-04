@@ -51,6 +51,9 @@ class NiStream:
     def root(self, node: NiObject | None):
         self.roots = [node]
 
+    def roots_of_type(self, cls: type[T]) -> Iterator[T]:
+        yield from (root for root in self.roots if isinstance(root, cls))
+
     def objects(self, iterator=chain.from_iterable) -> Iterator[NiObject]:
         yield from iterator(root._traverse({None}) for root in self.roots)
 

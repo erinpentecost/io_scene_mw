@@ -100,6 +100,9 @@ class NiAVObject(NiObjectNET):
     def is_bounding_box(self) -> bool:
         return bool(self.bounding_volume) and self.name.lower().startswith("bounding box")
 
+    def children_of_type(self, cls: type[T]) -> Iterator[T]:
+        yield from (child for child in self.children if isinstance(child, cls))
+
     def descendants(self, breadth_first=False) -> Iterator[NiAVObject]:
         queue = deque(filter(None, self.children))
         extend, iterator = (queue.extendleft, iter) if breadth_first else \

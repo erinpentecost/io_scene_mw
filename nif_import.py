@@ -62,6 +62,9 @@ class Importer:
         data.load(self.filepath)
         data.merge_properties()
 
+        # fix roots list
+        data.root = next(data.roots_of_type(nif.NiAVObject), nif.NiNode())
+
         # fix transforms
         if self.discard_root_transforms:
             if isinstance(data.root, nif.NiNode):
@@ -82,7 +85,7 @@ class Importer:
         data.apply_time_scale(bpy.context.scene.render.fps)
 
         # resolve heirarchy
-        roots = self.resolve_nodes(data.roots)
+        roots = self.resolve_nodes(data.roots_of_type(nif.NiAVObject))
 
         # resolve armatures
         if any(self.armatures):
@@ -123,7 +126,7 @@ class Importer:
             if self.process(node):
                 self.history[node.source].add(node)
                 if hasattr(node.source, "children"):
-                    queue.extend(SceneNode(self, child, node) for child in node.source.children if child)
+                    queue.extend(SceneNode(self, child, node) for child in node.source.children_of_type(nif.NiAVObject))
 
         return root_nodes
 
