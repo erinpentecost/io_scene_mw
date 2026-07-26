@@ -397,13 +397,13 @@ class LODNodeBlockType(NodeBlockType):
 
 
 class RootCollisionNodeBlockType(NodeBlockType):
+    def create_output(self, node, data=None):
+        return nif.RootCollisionNode(app_culled=True)
+
+
+class CollisionMeshBlockType(NodeBlockType):
     is_collision = True
     has_material_properties = False
-
-    def create_output(self, node, data=None):
-        if data is not None:
-            return super().create_output(node, data)
-        return nif.RootCollisionNode(app_culled=True)
 
     def allows_vertex_colors_without_material(self):
         return True
@@ -557,8 +557,10 @@ class SceneNode:
 
     @property
     def block_type(self):
-        if self.is_collider:
+        if self.source.type == "RootCollisionNode":
             return RootCollisionNodeBlockType()
+        if self.is_collider:
+            return CollisionMeshBlockType()
         if self.source.mw.block_type == "NiLODNode":
             return LODNodeBlockType()
         return NodeBlockType()

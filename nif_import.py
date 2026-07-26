@@ -434,6 +434,8 @@ class RootCollisionNodeBlockType(NodeBlockType):
         bl_object.display_type = "WIRE"
         bl_object.mw.block_type = "RootCollisionNode"
 
+
+class CollisionMeshBlockType(NodeBlockType):
     @staticmethod
     def _ensure_attribute(data, name, data_type, domain):
         attribute = data.attributes.get(name)
@@ -546,8 +548,10 @@ class SceneNode:
 
     @property
     def block_type(self):
-        if self.is_collider:
+        if self.source.type == "RootCollisionNode":
             return RootCollisionNodeBlockType()
+        if self.is_collider:
+            return CollisionMeshBlockType()
         return NodeBlockType()
 
     @property
