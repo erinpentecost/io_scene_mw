@@ -543,6 +543,7 @@ class Empty(SceneNode):
         if self.source in self.importer.colliders:
             self.output.name = "Collision"
             self.output.display_type = "WIRE"
+            self.output.mw.block_type = "RootCollisionNode"
 
         if self.source.is_bounding_box:
             self.convert_to_bounding_box()

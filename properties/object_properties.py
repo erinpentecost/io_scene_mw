@@ -10,6 +10,7 @@ class ObjectProperties(bpy.types.PropertyGroup):
         items=[
             ("NiNode", "NiNode", "A regular node"),
             ("NiLODNode", "NiLODNode", "A node whose children are used as LOD levels"),
+            ("RootCollisionNode", "RootCollisionNode", "A node whose descendants define collision geometry"),
         ],
         default="NiNode",
     )

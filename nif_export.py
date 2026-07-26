@@ -248,7 +248,7 @@ class Exporter:
             collection = node.source.instance_collection
             self.resolve_nodes(set(collection.objects), parent=node)
 
-        if (not self.colliders) and node.name.lower().startswith("collision"):
+        if node.source.mw.block_type == "RootCollisionNode" or node.name.lower().startswith("collision"):
             self.colliders[node.source].update(nif.NiAVObject.descendants(node.source))
 
         return True
@@ -643,8 +643,6 @@ class Mesh(SceneNode):
         bl.polygons.foreach_get("vertices", ni.triangles.ravel())
 
     def create_normals(self, ni, bl):
-        if self.is_collider:
-            return
         if bl["ignore_normals"]:
             return
 
@@ -659,8 +657,6 @@ class Mesh(SceneNode):
         ni.normals /= la.norm(ni.normals, axis=1, keepdims=True)
 
     def create_uv_sets(self, ni, bl):
-        if self.is_collider:
-            return
         if not any(uv.data for uv in bl.uv_layers):
             return
 
@@ -671,9 +667,7 @@ class Mesh(SceneNode):
             ni_uv[..., 1] = 1 - ni_uv[..., 1]
 
     def create_vertex_colors(self, ni, bl):
-        if self.is_collider:
-            return
-        if not any(self.source.material_slots):
+        if not self.is_collider and not any(self.source.material_slots):
             return
 
         if len(bl.vertex_colors):
