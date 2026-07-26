@@ -4,14 +4,14 @@ import bpy
 class ObjectProperties(bpy.types.PropertyGroup):
     object_flags: bpy.props.IntProperty(name="Flags", min=0, max=65535, default=2)
 
-    is_lod_node: bpy.props.BoolProperty(
-        name="LOD Node",
-        description=(
-            "Export this object as a NiLODNode."
-            " Children are used as LOD levels, ordered from highest to lowest detail,"
-            " each visible within its own 'Far Extent' distance range"
-        ),
-        default=False,
+    block_type: bpy.props.EnumProperty(
+        name="Block Type",
+        description="The NIF block type this object will be exported as",
+        items=[
+            ("NiNode", "NiNode", "A regular node"),
+            ("NiLODNode", "NiLODNode", "A node whose children are used as LOD levels"),
+        ],
+        default="NiNode",
     )
 
     lod_center: bpy.props.FloatVectorProperty(

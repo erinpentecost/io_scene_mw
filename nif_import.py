@@ -142,7 +142,7 @@ class Importer:
         each level's far extent is preserved; the near extent is expected to equal the
         previous level's far extent (0 for the first), and is recomputed on export.
         """
-        node.output.mw.is_lod_node = True
+        node.output.mw.block_type = "NiLODNode"
         node.output.mw.lod_center = tuple(node.source.lod_center)
 
         for child, (near, far) in zip(node.children, node.source.lod_levels):

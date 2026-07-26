@@ -525,7 +525,7 @@ class Empty(SceneNode):
                 self.output = nif.RootCollisionNode(app_culled=True)
             elif self.name == "PickProxy":
                 self.output = nif.NiCollisionSwitch(propagate=True)
-            elif self.source.mw.is_lod_node:
+            elif self.source.mw.block_type == "NiLODNode":
                 self.output = nif.NiLODNode(lod_center=np.array(self.source.mw.lod_center, dtype="<f"))
             elif self.exporter.create_switch_nodes and self.name.startswith("SWITCH_"):
                 self.output = nif.NiSwitchNode()
