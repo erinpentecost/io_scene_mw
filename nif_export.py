@@ -543,6 +543,10 @@ class Empty(SceneNode):
         # set flags
         self.output.flags |= self.source.mw.object_flags
 
+        # LOD nodes only need to update whichever level is actively visible
+        if isinstance(self.output, nif.NiLODNode):
+            self.output.update_only_active = True
+
         # set hidden
         if self.output.is_shadow:
             self.output.app_culled = True
