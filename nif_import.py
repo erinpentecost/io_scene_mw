@@ -420,6 +420,65 @@ class Importer:
         return addon.preferences.scale_correction
 
 
+class NodeBlockType:
+    def configure_object(self, node, bl_object):
+        pass
+
+    def prepare_mesh(self, node, bl_object):
+        pass
+
+
+class RootCollisionNodeBlockType(NodeBlockType):
+    def configure_object(self, node, bl_object):
+        bl_object.name = "Collision"
+        bl_object.display_type = "WIRE"
+        bl_object.mw.block_type = "RootCollisionNode"
+
+
+class CollisionMeshBlockType(NodeBlockType):
+    @staticmethod
+    def _ensure_attribute(data, name, data_type, domain):
+        attribute = data.attributes.get(name)
+        if attribute is None:
+            return data.attributes.new(name, data_type, domain)
+        if attribute.data_type != data_type or attribute.domain != domain:
+            data.attributes.remove(attribute)
+            return data.attributes.new(name, data_type, domain)
+        return attribute
+
+    def prepare_mesh(self, node, bl_object):
+        data = bl_object.data
+
+        sharp_face = self._ensure_attribute(data, "sharp_face", "BOOLEAN", "FACE")
+        for value, polygon in zip(sharp_face.data, data.polygons):
+            value.value = not polygon.use_smooth
+
+        uv_map = data.uv_layers.get("UVMap")
+        if uv_map is None:
+            if len(data.uv_layers):
+                uv_map = data.uv_layers[0]
+                uv_map.name = "UVMap"
+            else:
+                data.uv_layers.new(name="UVMap")
+
+        col = data.color_attributes.get("Col")
+        if col is None:
+            col = next((a for a in data.color_attributes if a.domain == "CORNER" and a.data_type == "BYTE_COLOR"), None)
+            if col is not None:
+                col.name = "Col"
+            else:
+                col = data.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+                for value in col.data:
+                    value.color = (1.0, 1.0, 1.0, 1.0)
+        elif col.domain != "CORNER" or col.data_type != "BYTE_COLOR":
+            data.color_attributes.remove(col)
+            col = data.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+            for value in col.data:
+                value.color = (1.0, 1.0, 1.0, 1.0)
+
+        self._ensure_attribute(data, "custom_normal", "INT16_2D", "CORNER")
+
+
 class SceneNode:
 
     def __init__(self, importer, source, parent=None):
@@ -484,6 +543,18 @@ class SceneNode:
         return props
 
     @property
+    def is_collider(self):
+        return any(self.source in s for s in self.importer.colliders.values())
+
+    @property
+    def block_type(self):
+        if self.source.type == "RootCollisionNode":
+            return RootCollisionNodeBlockType()
+        if self.is_collider:
+            return CollisionMeshBlockType()
+        return NodeBlockType()
+
+    @property
     def matrix_world(self):
         if self.parent:
             return self.parent.matrix_world @ self.matrix_local
@@ -540,9 +611,7 @@ class Empty(SceneNode):
             # parent is an empty or None
             self.output.matrix_local = self.matrix_local.T
 
-        if self.source in self.importer.colliders:
-            self.output.name = "Collision"
-            self.output.display_type = "WIRE"
+        self.block_type.configure_object(self, self.output)
 
         if self.source.is_bounding_box:
             self.convert_to_bounding_box()
@@ -664,6 +733,7 @@ class Mesh(SceneNode):
             self.create_vertex_morphs(bl_object, ni_data.vertex_morphs)
 
             self.create_normals(bl_object, ni_data.normals)
+            self.block_type.prepare_mesh(self, bl_object)
 
         try:
             self.output.display_type = self.parent.output.display_type
