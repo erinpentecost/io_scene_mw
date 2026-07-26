@@ -248,7 +248,10 @@ class Exporter:
             collection = node.source.instance_collection
             self.resolve_nodes(set(collection.objects), parent=node)
 
-        if node.source.mw.block_type == "RootCollisionNode" or node.name.lower().startswith("collision"):
+        if (
+            node.source.mw.block_type == "RootCollisionNode"
+            or node.name.lower().startswith("collision")
+        ):
             self.colliders[node.source].update(nif.NiAVObject.descendants(node.source))
 
         return True
@@ -366,6 +369,86 @@ class Exporter:
         return "CLAMP" if self.extract_keyframe_data else "CYCLE"
 
 
+class NodeBlockType:
+    is_collision = False
+    has_material_properties = True
+
+    def create_output(self, node, data=None):
+        if data is not None:
+            return nif.NiTriShape(data=data)
+        if node.name == "PickProxy":
+            return nif.NiCollisionSwitch(propagate=True)
+        if node.exporter.create_switch_nodes and node.name.startswith("SWITCH_"):
+            return nif.NiSwitchNode()
+        return nif.NiNode()
+
+    def prepare_mesh(self, node, bl_data):
+        pass
+
+    def allows_vertex_colors_without_material(self):
+        return False
+
+
+class LODNodeBlockType(NodeBlockType):
+    def create_output(self, node, data=None):
+        if data is not None:
+            return super().create_output(node, data)
+        return nif.NiLODNode(lod_center=np.array(node.source.mw.lod_center, dtype="<f"))
+
+
+class RootCollisionNodeBlockType(NodeBlockType):
+    is_collision = True
+    has_material_properties = False
+
+    def create_output(self, node, data=None):
+        if data is not None:
+            return super().create_output(node, data)
+        return nif.RootCollisionNode(app_culled=True)
+
+    def allows_vertex_colors_without_material(self):
+        return True
+
+    @staticmethod
+    def _ensure_attribute(data, name, data_type, domain):
+        attribute = data.attributes.get(name)
+        if attribute is None:
+            return data.attributes.new(name, data_type, domain)
+        if attribute.data_type != data_type or attribute.domain != domain:
+            data.attributes.remove(attribute)
+            return data.attributes.new(name, data_type, domain)
+        return attribute
+
+    def prepare_mesh(self, node, bl):
+        sharp_face = self._ensure_attribute(bl, "sharp_face", "BOOLEAN", "FACE")
+        for value, polygon in zip(sharp_face.data, bl.polygons):
+            value.value = not polygon.use_smooth
+
+        uv_map = bl.uv_layers.get("UVMap")
+        if uv_map is None:
+            if len(bl.uv_layers):
+                uv_map = bl.uv_layers[0]
+                uv_map.name = "UVMap"
+            else:
+                bl.uv_layers.new(name="UVMap")
+
+        col = bl.color_attributes.get("Col")
+        if col is None:
+            col = next((a for a in bl.color_attributes if a.domain == "CORNER" and a.data_type == "BYTE_COLOR"), None)
+            if col is not None:
+                col.name = "Col"
+            else:
+                col = bl.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+                for value in col.data:
+                    value.color = (1.0, 1.0, 1.0, 1.0)
+        elif col.domain != "CORNER" or col.data_type != "BYTE_COLOR":
+            bl.color_attributes.remove(col)
+            col = bl.color_attributes.new(name="Col", type="BYTE_COLOR", domain="CORNER")
+            for value in col.data:
+                value.color = (1.0, 1.0, 1.0, 1.0)
+
+        self._ensure_attribute(bl, "custom_normal", "INT16_2D", "CORNER")
+
+
 class SceneNode:
     def __init__(self, exporter, source, parent=None):
         self.exporter = exporter
@@ -472,6 +555,14 @@ class SceneNode:
     def is_collider(self):
         return any(self.source in s for s in self.exporter.colliders.values())
 
+    @property
+    def block_type(self):
+        if self.is_collider:
+            return RootCollisionNodeBlockType()
+        if self.source.mw.block_type == "NiLODNode":
+            return LODNodeBlockType()
+        return NodeBlockType()
+
     def ensure_uniform_scale(self):
         if self.is_bounding_box:
             return
@@ -518,19 +609,7 @@ class Empty(SceneNode):
         self.__dict__ = node.__dict__
 
     def create(self, data=None):
-        if isinstance(data, nif.NiTriShapeData):
-            self.output = nif.NiTriShape(data=data)
-        else:
-            if self.source in self.exporter.colliders:
-                self.output = nif.RootCollisionNode(app_culled=True)
-            elif self.name == "PickProxy":
-                self.output = nif.NiCollisionSwitch(propagate=True)
-            elif self.source.mw.block_type == "NiLODNode":
-                self.output = nif.NiLODNode(lod_center=np.array(self.source.mw.lod_center, dtype="<f"))
-            elif self.exporter.create_switch_nodes and self.name.startswith("SWITCH_"):
-                self.output = nif.NiSwitchNode()
-            else:
-                self.output = nif.NiNode()
+        self.output = self.block_type.create_output(self, data)
 
         # set fields
         self.output.name = self.name
@@ -588,6 +667,7 @@ class Mesh(SceneNode):
 
     def create(self):
         bl_object, bl_data = self.get_mesh_data()
+        self.block_type.prepare_mesh(self, bl_data)
 
         ni_data = nif.NiTriShapeData()
 
@@ -667,7 +747,7 @@ class Mesh(SceneNode):
             ni_uv[..., 1] = 1 - ni_uv[..., 1]
 
     def create_vertex_colors(self, ni, bl):
-        if not self.is_collider and not any(self.source.material_slots):
+        if not any(self.source.material_slots) and not self.block_type.allows_vertex_colors_without_material():
             return
 
         if len(bl.vertex_colors):
@@ -761,7 +841,7 @@ class Mesh(SceneNode):
         skin_data = nif_utils.Namespace(root=None, bones=(), weights=())
 
         # ignore collider meshes
-        if self.is_collider:
+        if self.block_type.is_collision:
             return skin_data
 
         # find the armature root
@@ -824,7 +904,7 @@ class Mesh(SceneNode):
             return morph_data
 
         # ignore collider meshes
-        if self.is_collider:
+        if self.block_type.is_collision:
             return morph_data
 
         # collect shape key data
@@ -987,7 +1067,7 @@ class Material(SceneNode):
         self.__dict__ = node.__dict__
 
     def create(self, material, ni_object):
-        if self.is_collider:
+        if not self.block_type.has_material_properties:
             return  # no properties on colliders
         if not (material and material.use_nodes):
             return  # not an applicable material
