@@ -15,6 +15,11 @@ class GenerateLODLevel(bpy.types.Operator):
         " (20000). The highest-detail (first) level is never touched"
     )
 
+    # Distance (in Blender units) used by Merge by Distance to weld coincident
+    # vertices along seams between joined source meshes before decimation.
+    # Tune this if seams still show gaps/holes after welding.
+    MERGE_DISTANCE = 0.0001
+
     @classmethod
     def poll(cls, context):
         ob = context.active_object
@@ -39,7 +44,7 @@ class GenerateLODLevel(bpy.types.Operator):
         for level in range(num_levels):
             ratio = max(1-(0.2*(level+1)), 0.2*(0.75 ** (level-4)))
             is_last = level == (num_levels - 1)
-            far_extent = 20000.0 if is_last else (level + 2) * 1500.0
+            far_extent = 20000.0 if is_last else (level + 2) * 2500.0
             self.create_level(context, source, parent, level, ratio, far_extent)
 
         return {"FINISHED"}
@@ -80,6 +85,15 @@ class GenerateLODLevel(bpy.types.Operator):
         context.view_layer.objects.active = meshes[0]
         bpy.ops.object.join()
         joined = context.view_layer.objects.active
+
+        # Weld coincident vertices along seams between the (formerly separate)
+        # source meshes. Without this, the decimator treats each side of a seam
+        # independently and can collapse them differently, opening up cracks/
+        # holes where adjacent parts used to share edges implicitly.
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.remove_doubles(threshold=self.MERGE_DISTANCE)
+        bpy.ops.object.mode_set(mode="OBJECT")
 
         # Count triangles before decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
