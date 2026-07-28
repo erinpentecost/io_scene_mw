@@ -18,6 +18,7 @@ class ObjectPanel(bpy.types.Panel):
         layout.prop(ob.mw, "block_type")
         if ob.mw.block_type == "NiLODNode":
             layout.prop(ob.mw, "lod_center")
+            layout.operator("object.mw_generate_lod_level")
 
         if (ob.parent is not None) and (ob.parent.mw.block_type == "NiLODNode"):
             layout.prop(ob.mw, "lod_far_extent")
