@@ -155,10 +155,10 @@ def export_nif(filepath):
         raise RuntimeError(f"Failed to export {filepath}: {result}")
 
 
-def process_file(input_path, output_path):
+def process_file(input_path, output_path, label=None):
     print()
     print("=" * 80)
-    print(f"Processing: {input_path.name}")
+    print(f"Processing: {label if label is not None else input_path.name}")
     print("=" * 80)
 
     clear_scene()
@@ -210,7 +210,7 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     nif_files = sorted(
-        path for path in input_dir.iterdir()
+        path for path in input_dir.rglob("*")
         if path.is_file() and path.suffix.lower() == ".nif"
     )
 
@@ -225,10 +225,19 @@ def main():
     failures = []
 
     for input_path in nif_files:
-        output_path = output_dir / input_path.name
+        relative_path = input_path.relative_to(input_dir)
+        output_path = output_dir / relative_path
+
+        # Mirror the input's subdirectory structure under the output directory.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # If the target file already exists (e.g. from a previous run), remove
+        # it first so the export below is a clean replacement.
+        if output_path.exists():
+            output_path.unlink()
 
         try:
-            process_file(input_path, output_path)
+            process_file(input_path, output_path, label=relative_path)
         except Exception as exc:
             print(
                 f"\nERROR processing {input_path.name}: "
@@ -246,7 +255,7 @@ def main():
     if failures:
         print("\nFailures:")
         for path, exc in failures:
-            print(f"  {path.name}: {exc}")
+            print(f"  {path.relative_to(input_dir)}: {exc}")
 
         raise SystemExit(1)
 
