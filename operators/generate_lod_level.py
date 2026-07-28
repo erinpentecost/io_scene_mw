@@ -37,7 +37,7 @@ class GenerateLODLevel(bpy.types.Operator):
         source.mw.lod_far_extent = 1500.0
 
         for level in range(num_levels):
-            ratio = max(1-(0.2*level), 0.2*(0.75 ** (level-5)))
+            ratio = max(1-(0.2*(level-1)), 0.2*(0.75 ** (level-6)))
             is_last = level == (num_levels - 1)
             far_extent = 20000.0 if is_last else (level + 2) * 1500.0
             self.create_level(context, source, parent, level, ratio, far_extent)
@@ -58,8 +58,14 @@ class GenerateLODLevel(bpy.types.Operator):
         meshes = [o for o in duplicates if o.type == "MESH"]
         others = [o for o in duplicates if o.type != "MESH"]
 
-        # any duplicated wrapper empties were only needed to keep the subtree intact
-        # while duplicating; discard them now that the meshes stand on their own
+        # The duplicated meshes are initially parented to duplicated wrapper empties.
+        # Reparent them before removing those wrappers, otherwise deleting the wrappers
+        # with do_unlink=True leaves the meshes as root objects instead of under the LOD node.
+        for mesh in meshes:
+            self.reparent_keep_transform(mesh, parent)
+
+        # Any duplicated wrapper empties were only needed to keep the subtree intact
+        # while duplicating; discard them now that the meshes stand on their own.
         for o in others:
             bpy.data.objects.remove(o, do_unlink=True)
 
