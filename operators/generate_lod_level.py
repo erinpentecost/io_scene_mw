@@ -32,10 +32,14 @@ class GenerateLODLevel(bpy.types.Operator):
         for level_ob in existing_levels:
             self.remove_hierarchy(level_ob)
 
+        # The original highest-detail level is LOD0 and always ends at 1500.
+        # Generated levels start at LOD1, so their extents continue from there.
+        source.mw.lod_far_extent = 1500.0
+
         for level in range(num_levels):
-            ratio = 0.75 ** level
+            ratio = max(1-(0.2*level), 0.2*(0.75 ** (level-5)))
             is_last = level == (num_levels - 1)
-            far_extent = 20000.0 if is_last else (level + 1) * 1500.0
+            far_extent = 20000.0 if is_last else (level + 2) * 1500.0
             self.create_level(context, source, parent, level, ratio, far_extent)
 
         return {"FINISHED"}
