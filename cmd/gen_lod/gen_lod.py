@@ -39,68 +39,77 @@ def import_nif(filepath):
 
 
 def find_non_collision_root():
-    """
-    Find the non-collision root imported from the NIF.
-
-    Collision roots are identified by the addon's RootCollisionNode
-    block type. We expect exactly one non-collision root.
-    """
-    roots = [
-        obj
-        for obj in bpy.context.scene.objects
-        if obj.parent is None
-    ]
-
-    non_collision = [
-        obj
-        for obj in roots
-        if obj.mw.block_type != "RootCollisionNode"
-    ]
-
+    """Find the non-collision scene root."""
+    roots = [obj for obj in bpy.context.scene.objects if obj.parent is None]
+    non_collision = [obj for obj in roots if obj.mw.block_type != "RootCollisionNode"]
     if len(non_collision) != 1:
-        details = "\n".join(
-            f"  {obj.name}: {obj.mw.block_type}"
-            for obj in roots
-        )
-        raise RuntimeError(
-            f"Expected exactly one non-collision root, "
-            f"found {len(non_collision)}.\n"
-            f"Root objects:\n{details}"
-        )
-
+        details = "\n".join(f"  {obj.name}: {obj.mw.block_type}" for obj in roots)
+        raise RuntimeError(f"Expected exactly one non-collision root, found {len(non_collision)}.\nRoot objects:\n{details}")
     return non_collision[0]
 
 
-def create_lod_container(source):
-    """
-    Create a new NiLODNode and make the imported non-collision
-    root its first child.
-    """
-    container = bpy.data.objects.new("LODContainer", None)
+def get_lod_source_children(root):
+    """Return direct non-collision children to put into LOD0."""
+    children = [child for child in root.children if child.mw.block_type != "RootCollisionNode"]
+    if not children:
+        raise RuntimeError(f"No non-collision children found under {root.name}")
+    return children
 
-    # Put the container in the same collection as the source.
-    for collection in source.users_collection:
+
+def create_lod_container(root):
+    """
+    Convert:
+        root
+        ├── collision
+        ├── meshpart1
+        └── meshpart2
+
+    into:
+        root
+        ├── collision
+        └── LODContainer (NiLODNode)
+            └── LOD0
+                ├── meshpart1
+                └── meshpart2
+
+    The original root remains the scene root so collision is outside the LOD hierarchy.
+    """
+    source_children = get_lod_source_children(root)
+
+    container = bpy.data.objects.new("LODContainer", None)
+    for collection in root.users_collection:
         collection.objects.link(container)
         break
     else:
         bpy.context.collection.objects.link(container)
 
-    # Preserve the source's world transform by making the new
-    # container occupy the same transform as the source.
-    container.matrix_world = source.matrix_world.copy()
-
-    # Explicitly make this object a NiLODNode for the addon.
+    container.matrix_world = root.matrix_world.copy()
     container.mw.block_type = "NiLODNode"
     container.mw.lod_center = (0.0, 0.0, 0.0)
 
-    # Reparent the original imported root under the LOD container.
-    # Preserve its world-space transform.
-    source_world = source.matrix_world.copy()
-    source.parent = container
-    source.matrix_world = source_world
+    container_world = container.matrix_world.copy()
+    container.parent = root
+    container.matrix_world = container_world
+
+    lod0 = bpy.data.objects.new("LOD0", None)
+    for collection in root.users_collection:
+        collection.objects.link(lod0)
+        break
+    else:
+        bpy.context.collection.objects.link(lod0)
+
+    lod0.matrix_world = container.matrix_world.copy()
+    lod0.mw.lod_far_extent = 1500.0
+    lod0_world = lod0.matrix_world.copy()
+    lod0.parent = container
+    lod0.matrix_world = lod0_world
+
+    for child in source_children:
+        child_world = child.matrix_world.copy()
+        child.parent = lod0
+        child.matrix_world = child_world
 
     return container
-
 
 def generate_lod_level(container):
     """Run the addon LOD generation operator on the container."""
@@ -168,11 +177,13 @@ def process_file(input_path, output_path):
     generate_lods(container)
 
     print("LOD hierarchy:")
-    for child in container.children:
+    for level in container.children:
         print(
-            f"  {child.name} "
-            f"(far extent: {child.mw.lod_far_extent})"
+            f"  {level.name} "
+            f"(far extent: {level.mw.lod_far_extent})"
         )
+        for child in level.children:
+            print(f"    {child.name}")
 
     export_nif(output_path)
 
