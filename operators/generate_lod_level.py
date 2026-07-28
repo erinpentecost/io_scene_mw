@@ -37,7 +37,7 @@ class GenerateLODLevel(bpy.types.Operator):
         source.mw.lod_far_extent = 1500.0
 
         for level in range(num_levels):
-            ratio = max(1-(0.2*(level-1)), 0.2*(0.75 ** (level-6)))
+            ratio = max(1-(0.2*(level+1)), 0.2*(0.75 ** (level-4)))
             is_last = level == (num_levels - 1)
             far_extent = 20000.0 if is_last else (level + 2) * 1500.0
             self.create_level(context, source, parent, level, ratio, far_extent)
@@ -81,10 +81,34 @@ class GenerateLODLevel(bpy.types.Operator):
         bpy.ops.object.join()
         joined = context.view_layer.objects.active
 
+        # Count triangles before decimation for debugging.
+        depsgraph = context.evaluated_depsgraph_get()
+        joined_mesh = joined.evaluated_get(depsgraph).to_mesh()
+        before_triangles = sum(
+            len(poly.vertices) - 2
+            for poly in joined_mesh.polygons
+        )
+        joined.evaluated_get(depsgraph).to_mesh_clear()
+
         # decimate
         modifier = joined.modifiers.new(name="Decimate", type="DECIMATE")
         modifier.ratio = ratio
         bpy.ops.object.modifier_apply(modifier=modifier.name)
+
+
+        # Count triangles after decimation for debugging.
+        depsgraph = context.evaluated_depsgraph_get()
+        joined_mesh = joined.evaluated_get(depsgraph).to_mesh()
+        after_triangles = sum(
+            len(poly.vertices) - 2
+            for poly in joined_mesh.polygons
+        )
+        joined.evaluated_get(depsgraph).to_mesh_clear()
+        print(
+            f"LOD level {level}: "
+            f"ratio={ratio}, "
+            f"triangles {before_triangles} -> {after_triangles}"
+        )
 
         # separate by material
         bpy.ops.object.mode_set(mode="EDIT")

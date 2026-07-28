@@ -1,0 +1,244 @@
+import bpy
+import sys
+from pathlib import Path
+
+
+def clear_scene():
+    """Remove everything from the current Blender scene."""
+    bpy.ops.object.mode_set(mode="OBJECT") if bpy.context.object and bpy.context.object.mode != "OBJECT" else None
+
+    bpy.ops.object.select_all(action="SELECT")
+    bpy.ops.object.delete(use_global=False)
+
+    # Remove orphaned data created by previous imports.
+    for datablocks in (
+        bpy.data.meshes,
+        bpy.data.curves,
+        bpy.data.materials,
+        bpy.data.cameras,
+        bpy.data.lights,
+    ):
+        for datablock in list(datablocks):
+            if datablock.users == 0:
+                datablocks.remove(datablock)
+
+
+def import_nif(filepath):
+    print(f"Importing: {filepath}")
+
+    result = bpy.ops.import_scene.mw(
+        filepath=str(filepath),
+        vertex_precision=0.001,
+        attach_keyframe_data=False,
+        discard_root_transforms=True,
+        use_existing_materials=False,
+    )
+
+    if "FINISHED" not in result:
+        raise RuntimeError(f"Failed to import {filepath}: {result}")
+
+
+def find_non_collision_root():
+    """
+    Find the non-collision root imported from the NIF.
+
+    Collision roots are identified by the addon's RootCollisionNode
+    block type. We expect exactly one non-collision root.
+    """
+    roots = [
+        obj
+        for obj in bpy.context.scene.objects
+        if obj.parent is None
+    ]
+
+    non_collision = [
+        obj
+        for obj in roots
+        if obj.mw.block_type != "RootCollisionNode"
+    ]
+
+    if len(non_collision) != 1:
+        details = "\n".join(
+            f"  {obj.name}: {obj.mw.block_type}"
+            for obj in roots
+        )
+        raise RuntimeError(
+            f"Expected exactly one non-collision root, "
+            f"found {len(non_collision)}.\n"
+            f"Root objects:\n{details}"
+        )
+
+    return non_collision[0]
+
+
+def create_lod_container(source):
+    """
+    Create a new NiLODNode and make the imported non-collision
+    root its first child.
+    """
+    container = bpy.data.objects.new("LODContainer", None)
+
+    # Put the container in the same collection as the source.
+    for collection in source.users_collection:
+        collection.objects.link(container)
+        break
+    else:
+        bpy.context.collection.objects.link(container)
+
+    # Preserve the source's world transform by making the new
+    # container occupy the same transform as the source.
+    container.matrix_world = source.matrix_world.copy()
+
+    # Explicitly make this object a NiLODNode for the addon.
+    container.mw.block_type = "NiLODNode"
+    container.mw.lod_center = (0.0, 0.0, 0.0)
+
+    # Reparent the original imported root under the LOD container.
+    # Preserve its world-space transform.
+    source_world = source.matrix_world.copy()
+    source.parent = container
+    source.matrix_world = source_world
+
+    return container
+
+
+def generate_lod_level(container):
+    """Run the addon LOD generation operator on the container."""
+    bpy.ops.object.select_all(action="DESELECT")
+
+    container.select_set(True)
+    bpy.context.view_layer.objects.active = container
+
+    result = bpy.ops.object.mw_generate_lod_level()
+
+    if "FINISHED" not in result:
+        raise RuntimeError(
+            f"LOD generation failed for {container.name}: {result}"
+        )
+
+
+def generate_lods(container):
+    print("Generating LOD level 1...")
+    generate_lod_level(container)
+
+    print("Generating LOD level 2...")
+    generate_lod_level(container)
+
+
+def export_nif(filepath):
+    print(f"Exporting: {filepath}")
+
+    result = bpy.ops.export_scene.mw(
+        filepath=str(filepath),
+        vertex_precision=0.001,
+        use_active_collection=False,
+        use_selection=False,
+        export_animations=True,
+        randomize_animations=True,
+        extract_keyframe_data=False,
+        preserve_root_tranforms=False,
+        preserve_material_names=True,
+        strip_numeric_suffixes=False,
+        create_switch_nodes=False,
+    )
+
+    if "FINISHED" not in result:
+        raise RuntimeError(f"Failed to export {filepath}: {result}")
+
+
+def process_file(input_path, output_path):
+    print()
+    print("=" * 80)
+    print(f"Processing: {input_path.name}")
+    print("=" * 80)
+
+    clear_scene()
+
+    import_nif(input_path)
+
+    source = find_non_collision_root()
+    print(
+        f"Non-collision root: {source.name} "
+        f"(block type: {source.mw.block_type})"
+    )
+
+    container = create_lod_container(source)
+    print(f"Created LOD container: {container.name}")
+
+    generate_lods(container)
+
+    print("LOD hierarchy:")
+    for child in container.children:
+        print(
+            f"  {child.name} "
+            f"(far extent: {child.mw.lod_far_extent})"
+        )
+
+    export_nif(output_path)
+
+
+def main():
+    # Blender arguments after "--":
+    #
+    # blender --background --python batch_lod.py -- INPUT_DIR OUTPUT_DIR
+    args = sys.argv[sys.argv.index("--") + 1:]
+
+    if len(args) != 2:
+        raise SystemExit(
+            "Usage:\n"
+            "  blender --background --python batch_lod.py "
+            "-- INPUT_DIR OUTPUT_DIR"
+        )
+
+    input_dir = Path(args[0]).resolve()
+    output_dir = Path(args[1]).resolve()
+
+    if not input_dir.is_dir():
+        raise SystemExit(f"Input directory does not exist: {input_dir}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    nif_files = sorted(
+        path for path in input_dir.iterdir()
+        if path.is_file() and path.suffix.lower() == ".nif"
+    )
+
+    if not nif_files:
+        print(f"No NIF files found in {input_dir}")
+        return
+
+    print(f"Input directory:  {input_dir}")
+    print(f"Output directory: {output_dir}")
+    print(f"Found {len(nif_files)} NIF files")
+
+    failures = []
+
+    for input_path in nif_files:
+        output_path = output_dir / input_path.name
+
+        try:
+            process_file(input_path, output_path)
+        except Exception as exc:
+            print(
+                f"\nERROR processing {input_path.name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            failures.append((input_path, exc))
+
+    print()
+    print("=" * 80)
+    print("BATCH COMPLETE")
+    print("=" * 80)
+    print(f"Processed: {len(nif_files) - len(failures)}")
+    print(f"Failed:    {len(failures)}")
+
+    if failures:
+        print("\nFailures:")
+        for path, exc in failures:
+            print(f"  {path.name}: {exc}")
+
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
