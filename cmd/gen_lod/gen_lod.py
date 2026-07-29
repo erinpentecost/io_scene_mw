@@ -191,18 +191,26 @@ def process_file(input_path, output_path, label=None):
 def main():
     # Blender arguments after "--":
     #
-    # blender --background --python batch_lod.py -- INPUT_DIR OUTPUT_DIR
+    # blender --background --python batch_lod.py -- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN]
+    #
+    # GLOB_PATTERN is optional and matched relative to INPUT_DIR using
+    # Path.rglob(), so it's implicitly prefixed with "**/". This lets you
+    # restrict processing to a subset of files, e.g.:
+    #   "*.nif"        -> all .nif files anywhere under INPUT_DIR (default)
+    #   "sky/*.nif"    -> only .nif files directly inside any "sky" folder
+    #   "sky/**/*.nif" -> .nif files anywhere under any "sky" folder
     args = sys.argv[sys.argv.index("--") + 1:]
 
-    if len(args) != 2:
+    if len(args) not in (2, 3):
         raise SystemExit(
             "Usage:\n"
             "  blender --background --python batch_lod.py "
-            "-- INPUT_DIR OUTPUT_DIR"
+            "-- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN]"
         )
 
     input_dir = Path(args[0]).resolve()
     output_dir = Path(args[1]).resolve()
+    glob_pattern = args[2] if len(args) == 3 else "*.nif"
 
     if not input_dir.is_dir():
         raise SystemExit(f"Input directory does not exist: {input_dir}")
@@ -210,16 +218,17 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     nif_files = sorted(
-        path for path in input_dir.rglob("*")
+        path for path in input_dir.rglob(glob_pattern)
         if path.is_file() and path.suffix.lower() == ".nif"
     )
 
     if not nif_files:
-        print(f"No NIF files found in {input_dir}")
+        print(f"No NIF files found in {input_dir} matching pattern {glob_pattern!r}")
         return
 
     print(f"Input directory:  {input_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"Glob pattern:     {glob_pattern}")
     print(f"Found {len(nif_files)} NIF files")
 
     failures = []
