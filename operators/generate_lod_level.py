@@ -108,7 +108,6 @@ class GenerateLODLevel(bpy.types.Operator):
         # preserve them through decimation is what produces the shading
         # artifacts on the simplified mesh. Instead, drop them here and
         # rebuild clean smoothing after decimating, below.
-        joined.data.use_auto_smooth = False
         bpy.ops.mesh.customdata_custom_splitnormals_clear()
 
         # Count triangles before decimation for debugging.
@@ -142,9 +141,10 @@ class GenerateLODLevel(bpy.types.Operator):
         # read as "hard" vs "soft" on the simplified mesh. 60 degrees is
         # Blender's own default and gives a reasonable approximation of
         # where hard edges used to be, without needing the original data.
-        bpy.ops.object.shade_smooth()
-        joined.data.use_auto_smooth = True
-        joined.data.auto_smooth_angle = 1.0472  # 60 degrees, in radians
+        # shade_auto_smooth() replaces the old use_auto_smooth/auto_smooth_angle
+        # mesh properties (removed in Blender 4.1+): it shades smooth and adds
+        # a "Smooth by Angle" modifier that splits normals past the given angle.
+        bpy.ops.object.shade_auto_smooth(angle=1.0472)  # 60 degrees, in radians
 
         # Count triangles after decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
