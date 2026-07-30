@@ -43,7 +43,7 @@ class GenerateLODLevel(bpy.types.Operator):
             level_ob.mw.lod_far_extent = (i + 2) * self.LOD_STEP
 
         ratio = max(1 - (0.2 * (new_level + 1)), 0.2 * (0.75 ** (new_level - 4)))
-        far_extent = 20000.0
+        far_extent = 30000.0
         self.create_level(context, source, parent, new_level, ratio, far_extent)
 
         return {"FINISHED"}
