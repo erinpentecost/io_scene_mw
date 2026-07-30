@@ -92,7 +92,24 @@ class GenerateLODLevel(bpy.types.Operator):
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
         bpy.ops.mesh.remove_doubles(threshold=self.MERGE_DISTANCE)
+
+        # Source meshes are frequently authored/imported with inconsistent
+        # winding order relative to one another (e.g. mirrored parts from a
+        # NIF import). After joining, this leaves some faces flipped, which
+        # by itself looks like "messed up normals" and also throws off the
+        # decimator (it uses face normals to decide which edges to collapse).
+        # Recalculate a globally consistent winding before decimating.
+        bpy.ops.mesh.normals_make_consistent(inside=False)
         bpy.ops.object.mode_set(mode="OBJECT")
+
+        # The Decimate modifier's edge-collapse algorithm does not correctly
+        # interpolate custom split normals (the per-face-corner normals used
+        # for hard edges / custom shading baked in on import). Trying to
+        # preserve them through decimation is what produces the shading
+        # artifacts on the simplified mesh. Instead, drop them here and
+        # rebuild clean smoothing after decimating, below.
+        joined.data.use_auto_smooth = False
+        bpy.ops.mesh.customdata_custom_splitnormals_clear()
 
         # Count triangles before decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
@@ -108,6 +125,26 @@ class GenerateLODLevel(bpy.types.Operator):
         modifier.ratio = ratio
         bpy.ops.object.modifier_apply(modifier=modifier.name)
 
+        # The collapse operation above can leave a handful of degenerate/
+        # flipped faces and always leaves flat per-face-loop normals (we
+        # stripped the custom split normals before decimating, since the
+        # modifier can't interpolate those correctly). Recalculate a
+        # consistent, outward-facing normal per face, then let Blender
+        # regenerate smooth vertex normals from that clean base.
+        bpy.ops.object.mode_set(mode="EDIT")
+        bpy.ops.mesh.select_all(action="SELECT")
+        bpy.ops.mesh.normals_make_consistent(inside=False)
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        # Use angle-based auto smooth rather than a uniform shade_smooth().
+        # We threw away the original custom split normals (the modifier can't
+        # decimate those correctly), so this is what now decides which edges
+        # read as "hard" vs "soft" on the simplified mesh. 60 degrees is
+        # Blender's own default and gives a reasonable approximation of
+        # where hard edges used to be, without needing the original data.
+        bpy.ops.object.shade_smooth()
+        joined.data.use_auto_smooth = True
+        joined.data.auto_smooth_angle = 1.0472  # 60 degrees, in radians
 
         # Count triangles after decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
