@@ -21,6 +21,7 @@ class GenerateLODLevel(bpy.types.Operator):
     MERGE_DISTANCE = 0.0001
     # A cell is 8192 units wide.
     LOD_STEP = 3500.0
+    MAX_DIST = 3.4028235e38
 
     @classmethod
     def poll(cls, context):
@@ -43,7 +44,7 @@ class GenerateLODLevel(bpy.types.Operator):
             level_ob.mw.lod_far_extent = (i + 2) * self.LOD_STEP
 
         ratio = max(1 - (0.2 * (new_level + 1)), 0.2 * (0.75 ** (new_level - 4)))
-        far_extent = 30000.0
+        far_extent = self.MAX_DIST
         self.create_level(context, source, parent, new_level, ratio, far_extent)
 
         return {"FINISHED"}
