@@ -3,6 +3,10 @@ import sys
 from pathlib import Path
 
 
+class AlreadyHasLodError(Exception):
+    """Raised when the imported NIF already contains a NiLODNode."""
+
+
 def clear_scene():
     """Remove everything from the current Blender scene."""
     bpy.ops.object.mode_set(mode="OBJECT") if bpy.context.object and bpy.context.object.mode != "OBJECT" else None
@@ -36,6 +40,11 @@ def import_nif(filepath):
 
     if "FINISHED" not in result:
         raise RuntimeError(f"Failed to import {filepath}: {result}")
+
+
+def has_existing_lod_node():
+    """Return True if the currently loaded scene already contains a NiLODNode."""
+    return any(obj.mw.block_type == "NiLODNode" for obj in bpy.context.scene.objects)
 
 
 def find_non_collision_root():
@@ -186,6 +195,10 @@ def process_file(input_path, output_path, label=None):
 
     import_nif(input_path)
 
+    if has_existing_lod_node():
+        print("Skipping: input already contains a NiLODNode.")
+        raise AlreadyHasLodError(f"{input_path.name} already contains a NiLODNode")
+
     source = find_non_collision_root()
     print(
         f"Non-collision root: {source.name} "
@@ -205,6 +218,14 @@ def process_file(input_path, output_path, label=None):
         )
         for child in level.children:
             print(f"    {child.name}")
+
+    # If the target file already exists (e.g. from a previous run), remove it
+    # first so the export below is a clean replacement. This is done
+    # case-insensitively since NIF filenames may vary in case between
+    # runs/sources but should still be treated as the same file. This is
+    # deliberately done as late as possible (only once we know we're going to
+    # write a new file) so a skipped input never touches an existing output.
+    remove_existing_case_insensitive(output_path)
 
     export_nif(output_path)
 
@@ -253,6 +274,7 @@ def main():
     print(f"Found {len(nif_files)} NIF files")
 
     failures = []
+    skipped = []
 
     for input_path in nif_files:
         relative_path = input_path.relative_to(input_dir)
@@ -261,14 +283,10 @@ def main():
         # Mirror the input's subdirectory structure under the output directory.
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # If the target file already exists (e.g. from a previous run), remove
-        # it first so the export below is a clean replacement. This is done
-        # case-insensitively since NIF filenames may vary in case between
-        # runs/sources but should still be treated as the same file.
-        remove_existing_case_insensitive(output_path)
-
         try:
             process_file(input_path, output_path, label=relative_path)
+        except AlreadyHasLodError as exc:
+            skipped.append((input_path, exc))
         except Exception as exc:
             print(
                 f"\nERROR processing {input_path.name}: "
@@ -280,8 +298,14 @@ def main():
     print("=" * 80)
     print("BATCH COMPLETE")
     print("=" * 80)
-    print(f"Processed: {len(nif_files) - len(failures)}")
+    print(f"Processed: {len(nif_files) - len(failures) - len(skipped)}")
+    print(f"Skipped:   {len(skipped)} (already had a NiLODNode)")
     print(f"Failed:    {len(failures)}")
+
+    if skipped:
+        print("\nSkipped:")
+        for path, exc in skipped:
+            print(f"  {path.relative_to(input_dir)}")
 
     if failures:
         print("\nFailures:")
