@@ -155,6 +155,27 @@ def export_nif(filepath):
         raise RuntimeError(f"Failed to export {filepath}: {result}")
 
 
+def remove_existing_case_insensitive(output_path):
+    """
+    Remove any file already in output_path's directory whose name matches
+    output_path's name case-insensitively (e.g. a previous run wrote
+    "Armor.NIF" and this run wants to write "armor.nif").
+
+    On case-sensitive filesystems (Linux/macOS default), a plain
+    output_path.exists() check would miss such a file, leaving a stale
+    duplicate alongside the newly exported one.
+    """
+    target_name = output_path.name.lower()
+    parent = output_path.parent
+
+    if not parent.is_dir():
+        return
+
+    for existing in parent.iterdir():
+        if existing.is_file() and existing.name.lower() == target_name:
+            existing.unlink()
+
+
 def process_file(input_path, output_path, label=None):
     print()
     print("=" * 80)
@@ -241,9 +262,10 @@ def main():
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
         # If the target file already exists (e.g. from a previous run), remove
-        # it first so the export below is a clean replacement.
-        if output_path.exists():
-            output_path.unlink()
+        # it first so the export below is a clean replacement. This is done
+        # case-insensitively since NIF filenames may vary in case between
+        # runs/sources but should still be treated as the same file.
+        remove_existing_case_insensitive(output_path)
 
         try:
             process_file(input_path, output_path, label=relative_path)
