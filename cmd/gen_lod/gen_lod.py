@@ -60,21 +60,33 @@ def find_non_collision_roots():
 
 def extract_nested_collision(root):
     """
-    Detach any direct RootCollisionNode children of `root` and re-home them
-    as their own top-level objects, preserving their original world
-    transform.
+    Detach any RootCollisionNode descendants of `root`, however deeply
+    nested, and re-home them as their own top-level objects, preserving
+    their original world transform.
 
-    This runs before `root` gets moved under the LOD hierarchy, so collision
-    that happens to be nested directly under a non-collision root never gets
-    dragged along with it - collision doesn't change with viewing distance,
-    so it has no business living under a NiLODNode.
+    This runs before `root` gets moved under the LOD hierarchy, so
+    collision nested anywhere inside root's subtree - not just as a direct
+    child - never gets dragged along with it: collision doesn't change
+    with viewing distance, so it has no business living under a
+    NiLODNode.
     """
-    collision_children = [child for child in root.children if child.mw.block_type == "RootCollisionNode"]
-    for collision in collision_children:
+    collision_nodes = []
+    stack = list(root.children)
+    while stack:
+        obj = stack.pop()
+        if obj.mw.block_type == "RootCollisionNode":
+            collision_nodes.append(obj)
+            # Don't descend into a collision node's own children - it's
+            # extracted as a whole subtree, not searched further.
+        else:
+            stack.extend(obj.children)
+
+    for collision in collision_nodes:
         collision_world = collision.matrix_world.copy()
         collision.parent = None
         collision.matrix_world = collision_world
-    return collision_children
+
+    return collision_nodes
 
 
 def create_lod_container(roots):
@@ -100,9 +112,9 @@ def create_lod_container(roots):
     exactly one LODContainer / LOD0 (and, once generate_lods runs, LOD1 /
     LOD2 as its siblings) for the whole file - regardless of how many
     separate non-collision roots the source had. Any RootCollisionNode,
-    whether it was already its own top-level root or nested directly under
-    one of these roots, ends up (or stays) outside the LOD hierarchy
-    entirely.
+    whether it was already its own top-level root or nested anywhere
+    beneath one of these roots (at any depth), ends up (or stays) outside
+    the LOD hierarchy entirely.
     """
     reference = roots[0]
 
