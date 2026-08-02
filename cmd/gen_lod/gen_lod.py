@@ -1,6 +1,7 @@
 import bpy
 import sys
 from pathlib import Path
+from mathutils import Matrix
 
 
 class AlreadyHasLodError(Exception):
@@ -47,61 +48,96 @@ def has_existing_lod_node():
     return any(obj.mw.block_type == "NiLODNode" for obj in bpy.context.scene.objects)
 
 
-def find_non_collision_root():
-    """Find the non-collision scene root."""
+def find_non_collision_roots():
+    """Find all non-collision scene roots (there may be more than one)."""
     roots = [obj for obj in bpy.context.scene.objects if obj.parent is None]
     non_collision = [obj for obj in roots if obj.mw.block_type != "RootCollisionNode"]
-    if len(non_collision) != 1:
+    if not non_collision:
         details = "\n".join(f"  {obj.name}: {obj.mw.block_type}" for obj in roots)
-        raise RuntimeError(f"Expected exactly one non-collision root, found {len(non_collision)}.\nRoot objects:\n{details}")
-    return non_collision[0]
+        raise RuntimeError(f"Expected at least one non-collision root, found none.\nRoot objects:\n{details}")
+    return non_collision
 
 
-def get_lod_source_children(root):
-    """Return direct non-collision children to put into LOD0."""
-    children = [child for child in root.children if child.mw.block_type != "RootCollisionNode"]
-    if not children:
-        raise RuntimeError(f"No non-collision children found under {root.name}")
-    return children
-
-
-def create_lod_container(root):
+def extract_nested_collision(root):
     """
-    Convert:
-        root
-        ├── collision
-        ├── meshpart1
+    Detach any RootCollisionNode descendants of `root`, however deeply
+    nested, and re-home them as their own top-level objects, preserving
+    their original world transform.
+
+    This runs before `root` gets moved under the LOD hierarchy, so
+    collision nested anywhere inside root's subtree - not just as a direct
+    child - never gets dragged along with it: collision doesn't change
+    with viewing distance, so it has no business living under a
+    NiLODNode.
+    """
+    collision_nodes = []
+    stack = list(root.children)
+    while stack:
+        obj = stack.pop()
+        if obj.mw.block_type == "RootCollisionNode":
+            collision_nodes.append(obj)
+            # Don't descend into a collision node's own children - it's
+            # extracted as a whole subtree, not searched further.
+        else:
+            stack.extend(obj.children)
+
+    for collision in collision_nodes:
+        collision_world = collision.matrix_world.copy()
+        collision.parent = None
+        collision.matrix_world = collision_world
+
+    return collision_nodes
+
+
+def create_lod_container(roots):
+    """
+    Convert (however many non-collision roots exist, each of which may have
+    its own nested collision):
+        root_A
+        ├── collision_A
+        └── meshpart1
+        root_B
         └── meshpart2
 
     into:
-        root
-        ├── collision
-        └── LODContainer (NiLODNode)
+        collision_A                (preserved, now its own top-level object)
+        LODContainer (NiLODNode)   (new top-level object)
             └── LOD0
-                ├── meshpart1
-                └── meshpart2
+                ├── root_A         (now collision-free)
+                │    └── meshpart1
+                └── root_B
+                     └── meshpart2
 
-    The original root remains the scene root so collision is outside the LOD hierarchy.
+    Every non-collision root is gathered under one shared LOD0, so there is
+    exactly one LODContainer / LOD0 (and, once generate_lods runs, LOD1 /
+    LOD2 as its siblings) for the whole file - regardless of how many
+    separate non-collision roots the source had. Any RootCollisionNode,
+    whether it was already its own top-level root or nested anywhere
+    beneath one of these roots (at any depth), ends up (or stays) outside
+    the LOD hierarchy entirely.
     """
-    source_children = get_lod_source_children(root)
+    reference = roots[0]
+
+    # Strip nested collision out of each root before moving it, so it's
+    # never carried into LOD0 as a side effect of moving its parent.
+    for root in roots:
+        extract_nested_collision(root)
 
     container = bpy.data.objects.new("LODContainer", None)
-    for collection in root.users_collection:
+    for collection in reference.users_collection:
         collection.objects.link(container)
         break
     else:
         bpy.context.collection.objects.link(container)
 
-    container.matrix_world = root.matrix_world.copy()
+    # The container is a brand-new top-level object with no root of its own
+    # to inherit a transform from, so it gets an identity transform.
+    container.matrix_world = Matrix.Identity(4)
     container.mw.block_type = "NiLODNode"
     container.mw.lod_center = (0.0, 0.0, 0.0)
 
-    container_world = container.matrix_world.copy()
-    container.parent = root
-    container.matrix_world = container_world
-
     lod0 = bpy.data.objects.new("LOD0", None)
-    for collection in root.users_collection:
+    for collection in reference.users_collection:
         collection.objects.link(lod0)
         break
     else:
@@ -113,10 +149,10 @@ def create_lod_container(root):
     lod0.parent = container
     lod0.matrix_world = lod0_world
 
-    for child in source_children:
-        child_world = child.matrix_world.copy()
-        child.parent = lod0
-        child.matrix_world = child_world
+    for root in roots:
+        root_world = root.matrix_world.copy()
+        root.parent = lod0
+        root.matrix_world = root_world
 
     return container
 
@@ -199,13 +235,12 @@ def process_file(input_path, output_path, label=None):
         print("Skipping: input already contains a NiLODNode.")
         raise AlreadyHasLodError(f"{input_path.name} already contains a NiLODNode")
 
-    source = find_non_collision_root()
-    print(
-        f"Non-collision root: {source.name} "
-        f"(block type: {source.mw.block_type})"
-    )
+    sources = find_non_collision_roots()
+    print(f"Non-collision roots ({len(sources)}):")
+    for source in sources:
+        print(f"  {source.name} (block type: {source.mw.block_type})")
 
-    container = create_lod_container(source)
+    container = create_lod_container(sources)
     print(f"Created LOD container: {container.name}")
 
     generate_lods(container)
