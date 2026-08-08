@@ -121,7 +121,10 @@ class GenerateLODLevel(bpy.types.Operator):
         bm.verts.index_update()
         # "targetmap" maps {vertex_removed: vertex_it_was_merged_into}; the
         # values are the survivors - the seam vertices we want to retain.
-        merged_vert_indices = {v.index for v in set(weld_result["targetmap"].values())}
+        if weld_result and "targetmap" in weld_result:
+            merged_vert_indices = {v.index for v in set(weld_result["targetmap"].values())}
+        else:
+            merged_vert_indices = set()
         bmesh.update_edit_mesh(joined.data)
 
         # Source meshes are frequently authored/imported with inconsistent
@@ -182,7 +185,9 @@ class GenerateLODLevel(bpy.types.Operator):
 
         # The vertex group above only existed to steer this decimation pass;
         # drop it now so it doesn't linger as leftover data on the LOD mesh.
-        joined.vertex_groups.remove(seam_vgroup)
+        vgroup = joined.vertex_groups.get(self.SEAM_VERTEX_GROUP_NAME)
+        if vgroup is not None:
+            joined.vertex_groups.remove(vgroup)
 
         # The collapse operation above can leave a handful of degenerate/
         # flipped faces and always leaves flat per-face-loop normals (we
