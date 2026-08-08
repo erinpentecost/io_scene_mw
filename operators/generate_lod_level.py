@@ -1,5 +1,6 @@
 import re
 
+import bmesh
 import bpy
 
 
@@ -19,6 +20,16 @@ class GenerateLODLevel(bpy.types.Operator):
     # vertices along seams between joined source meshes before decimation.
     # Tune this if seams still show gaps/holes after welding.
     MERGE_DISTANCE = 0.0001
+    # Vertex group used internally to bias the Decimate modifier toward
+    # protecting the vertices produced by the seam weld above (see
+    # create_level()). Created fresh for each LOD level and removed again
+    # once that level's decimation is applied.
+    SEAM_VERTEX_GROUP_NAME = "mw_lod_seam"
+    # Effective Decimate-modifier weight given to seam vertices: 0.0 leaves
+    # them fully protected (their edges never collapse), 1.0 gives them no
+    # special treatment at all and lets them decimate like any other vertex.
+    # See the vertex group setup in create_level() for how this is applied.
+    SEAM_VERTEX_WEIGHT = 0.1
     # A cell is 8192 units wide.
     LOD_STEP = 3500.0
     MAX_DIST = 3.4028235e38
@@ -90,9 +101,28 @@ class GenerateLODLevel(bpy.types.Operator):
         # source meshes. Without this, the decimator treats each side of a seam
         # independently and can collapse them differently, opening up cracks/
         # holes where adjacent parts used to share edges implicitly.
+        #
+        # We do this with bmesh directly rather than bpy.ops.mesh.remove_doubles
+        # so we can find out exactly *which* vertices the weld produced. Those
+        # are the vertices now holding the seam together, and the decimator has
+        # no idea that matters - left alone it can collapse them away again
+        # like any other vertex, re-opening the cracks the weld just closed. We
+        # record them here and bias the decimator to protect them, below.
         bpy.ops.object.mode_set(mode="EDIT")
         bpy.ops.mesh.select_all(action="SELECT")
-        bpy.ops.mesh.remove_doubles(threshold=self.MERGE_DISTANCE)
+
+        bm = bmesh.from_edit_mesh(joined.data)
+        bm.verts.ensure_lookup_table()
+        weld_result = bmesh.ops.remove_doubles(
+            bm, verts=list(bm.verts), dist=self.MERGE_DISTANCE
+        )
+        # Vertex indices go stale once verts are removed by the weld; refresh
+        # them before reading .index below.
+        bm.verts.index_update()
+        # "targetmap" maps {vertex_removed: vertex_it_was_merged_into}; the
+        # values are the survivors - the seam vertices we want to retain.
+        merged_vert_indices = {v.index for v in set(weld_result["targetmap"].values())}
+        bmesh.update_edit_mesh(joined.data)
 
         # Source meshes are frequently authored/imported with inconsistent
         # winding order relative to one another (e.g. mirrored parts from a
@@ -111,6 +141,29 @@ class GenerateLODLevel(bpy.types.Operator):
         # rebuild clean smoothing after decimating, below.
         bpy.ops.mesh.customdata_custom_splitnormals_clear()
 
+        # Put the welded seam vertices in their own vertex group so the
+        # Decimate modifier below can be biased to protect them.
+        #
+        # The Decimate modifier treats any vertex that is *not* a member of
+        # its vertex group as having an implicit weight of 0.0, and a weight
+        # of 0.0 on either endpoint makes that edge un-collapsible. Rather
+        # than explicitly weighting every single vertex in the mesh, we take
+        # advantage of that default: put only the (typically much smaller)
+        # set of seam vertices into the group, then turn on the modifier's
+        # "Invert Vertex Group" option so the meaning flips - seam vertices
+        # (in the group) end up with SEAM_VERTEX_WEIGHT, and every other
+        # vertex (not in the group, inverted from its implicit 0.0) ends up
+        # with a full 1.0, decimating normally.
+        seam_vgroup = joined.vertex_groups.new(name=self.SEAM_VERTEX_GROUP_NAME)
+        if merged_vert_indices:
+            seam_vgroup.add(
+                list(merged_vert_indices), 1.0 - self.SEAM_VERTEX_WEIGHT, "REPLACE"
+            )
+        print(
+            f"LOD level {level + 1}: "
+            f"retaining {len(merged_vert_indices)} welded seam vertices through decimation"
+        )
+
         # Count triangles before decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
         joined_mesh = joined.evaluated_get(depsgraph).to_mesh()
@@ -123,7 +176,13 @@ class GenerateLODLevel(bpy.types.Operator):
         # decimate
         modifier = joined.modifiers.new(name="Decimate", type="DECIMATE")
         modifier.ratio = ratio
+        modifier.vertex_group = seam_vgroup.name
+        modifier.invert_vertex_group = True
         bpy.ops.object.modifier_apply(modifier=modifier.name)
+
+        # The vertex group above only existed to steer this decimation pass;
+        # drop it now so it doesn't linger as leftover data on the LOD mesh.
+        joined.vertex_groups.remove(seam_vgroup)
 
         # The collapse operation above can leave a handful of degenerate/
         # flipped faces and always leaves flat per-face-loop normals (we

@@ -22,6 +22,91 @@ other_axis_correction = np.array(axis_conversion('Y', 'Z', '-Z', '-Y').to_4x4(),
 other_axis_correction_inverse = la.inv(other_axis_correction)
 
 
+# Cache: a NIF's own containing directory -> auto-detected textures folder
+# (or None), so repeated imports from the same data folder don't re-walk
+# the filesystem for every single texture.
+_auto_textures_folder_cache = {}
+
+
+def _auto_detect_textures_folder(start_dir):
+    """
+    Walk up from `start_dir` looking for a folder literally named "meshes"
+    (case-insensitive) - as `start_dir` itself, a child of it, or an
+    ancestor of it - and return the "textures" sibling of that folder's
+    parent (also matched case-insensitively). Returns None if no such
+    layout is found.
+
+    This is a fallback for when the "Texture Paths" addon preference is
+    empty or doesn't include the data folder the NIF currently being
+    imported actually lives in - which otherwise makes every texture
+    resolve to a 1x1 placeholder image with no error. It mirrors the data
+    folder detection in cmd/list_materials/list_materials.py so behavior
+    is consistent between the addon and that script.
+    """
+    start_dir = pathlib.Path(start_dir)
+    if start_dir in _auto_textures_folder_cache:
+        return _auto_textures_folder_cache[start_dir]
+
+    data_folder = None
+    if start_dir.name.lower() == "meshes":
+        data_folder = start_dir.parent
+    else:
+        try:
+            for child in start_dir.iterdir():
+                if child.is_dir() and child.name.lower() == "meshes":
+                    data_folder = start_dir
+                    break
+        except OSError:
+            pass
+
+        if data_folder is None:
+            for ancestor in start_dir.parents:
+                if ancestor.name.lower() == "meshes":
+                    data_folder = ancestor.parent
+                    break
+
+    textures_folder = None
+    if data_folder is not None:
+        try:
+            for child in data_folder.iterdir():
+                if child.is_dir() and child.name.lower() == "textures":
+                    textures_folder = child
+                    break
+        except OSError:
+            pass
+
+    _auto_textures_folder_cache[start_dir] = textures_folder
+    return textures_folder
+
+
+def _find_texture_by_stem(folder, dir_parts, stem):
+    """
+    Case-insensitively walk `dir_parts` under `folder`, then return the
+    first file in the final directory whose extensionless name matches
+    `stem` (case-insensitive) - regardless of its actual on-disk
+    extension, so a NIF requesting "foo.tga" still resolves when only a
+    "foo.dds" replacer is present. Returns None if not found.
+    """
+    current = pathlib.Path(folder)
+    for part in dir_parts:
+        try:
+            entries = {e.name.lower(): e.name for e in current.iterdir() if e.is_dir()}
+        except OSError:
+            return None
+        real_name = entries.get(part.lower())
+        if real_name is None:
+            return None
+        current = current / real_name
+
+    try:
+        for entry in current.iterdir():
+            if entry.is_file() and entry.stem.lower() == stem:
+                return entry
+    except OSError:
+        pass
+    return None
+
+
 def load(context, filepath, **config):
     """load a scene from a nif file"""
 
@@ -1138,8 +1223,8 @@ class Material(SceneNode):
         slot.link = "OBJECT"
         slot.material = bl_material
 
-    @staticmethod
     def resolve_texture_path(
+        self,
         relpath,
         case_insensitive = pathlib.Path(__file__.upper()).exists()
     ):
@@ -1147,17 +1232,17 @@ class Material(SceneNode):
         path = pathlib.Path(bpy.path.native_pathsep(relpath).lower())
 
         # discard "data files" prefix
-        if path.parts[0] == "data files":
+        if path.parts and path.parts[0] == "data files":
             path = path.relative_to("data files")
 
         # discard "textures" prefix
-        if path.parts[0] == "textures":
+        if path.parts and path.parts[0] == "textures":
             path = path.relative_to("textures")
 
         # potential file extensions
         suffixes = {path.suffix, ".dds", ".tga", ".bmp"}
 
-        # evaluate final image path
+        # evaluate final image path against the configured Texture Paths
         addon = bpy.context.preferences.addons[__package__]
         for item in addon.preferences.texture_paths:
             abspath = item.name / path
@@ -1167,6 +1252,24 @@ class Material(SceneNode):
                     abspath = pathlib.Path(bpy.path.resolve_ncase(str(abspath)))
                 if abspath.exists():
                     return abspath
+
+        # Fall back to auto-detecting the data folder from the NIF file
+        # currently being imported: find a "meshes" folder as/above its
+        # own directory, and use that folder's "textures" sibling. This
+        # makes texture resolution work for any Data Files-style layout
+        # even when "Texture Paths" hasn't been configured to include it
+        # - which otherwise makes every texture silently resolve to a
+        # 1x1 placeholder image rather than the real file. Matches by
+        # filename stem only, so a requested .tga still finds an on-disk
+        # .dds replacer (or vice versa).
+        if path.parts:
+            textures_folder = _auto_detect_textures_folder(self.importer.filepath.parent)
+            if textures_folder is not None:
+                found = _find_texture_by_stem(
+                    textures_folder, path.parts[:-1], pathlib.Path(path.parts[-1]).stem
+                )
+                if found is not None:
+                    return found
 
         return ("textures" / path)
 

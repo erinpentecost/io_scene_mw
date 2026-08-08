@@ -116,13 +116,27 @@ class NodeTreeWrapper:
         self.links.clear()
 
         # Shader Group
-        self.create_shader_group("MW Shader", 0, 0)
+        shader = self.create_shader_group("MW Shader", 0, 0)
 
         # Texture Groups
         self.create_texture_group("MW Inputs", -200, 0)
 
         # Vertex Color
         self.create_node("Vertex Color", "ShaderNodeVertexColor", -200, -400)
+
+        # Material Output
+        #
+        # "MW Shader" (loaded from assets/shader.blend) already contains a
+        # fully wired diffuse/emission/decal/alpha shading chain - it just
+        # has no output socket, since its sockets were originally built
+        # purely as inputs for this addon's property panel. Without this,
+        # the resulting material has no node feeding Material Output at
+        # all, so it renders as plain black in Material Preview/Cycles/
+        # Eevee and falls back to Blender's flat default gray everywhere
+        # else - regardless of whether textures resolved correctly.
+        output = self.create_node("Material Output", "ShaderNodeOutputMaterial", 400, 0)
+        output.is_active_output = True
+        self.links.new(shader.outputs["Shader"], output.inputs["Surface"])
 
     def create_shader_group(self, name, x, y):
         group = self.create_node(name, "ShaderNodeGroup", x, y)
@@ -222,10 +236,20 @@ class NodeTreeWrapper:
         m = self.material
         if not (m and m.use_nodes):
             raise TypeError("Invalid Material: use_nodes not enabled")
-        if m.node_tree.get_output_node('EEVEE'):
-            raise TypeError("Invalid Material: eevee output override")
         if "MW Shader" not in m.node_tree.nodes:
             raise TypeError("Invalid Material: mw_shader not present")
+        out = m.node_tree.get_output_node('EEVEE')
+        if out is not None:
+            # A clean, addon-generated material's output is always fed
+            # directly by "MW Shader" (see reset_nodes()). Anything else
+            # means the user has manually customized this material's
+            # shading beyond the addon's control, so it shouldn't be
+            # silently reused/merged as if it were still a stock MW
+            # material.
+            surface = out.inputs.get("Surface")
+            linked_from = surface.links[0].from_node if surface and surface.links else None
+            if linked_from is None or linked_from.name != "MW Shader":
+                raise TypeError("Invalid Material: eevee output override")
         return self
 
     @staticmethod
