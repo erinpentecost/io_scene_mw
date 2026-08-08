@@ -121,7 +121,10 @@ class GenerateLODLevel(bpy.types.Operator):
         bm.verts.index_update()
         # "targetmap" maps {vertex_removed: vertex_it_was_merged_into}; the
         # values are the survivors - the seam vertices we want to retain.
-        merged_vert_indices = {v.index for v in set(weld_result["targetmap"].values())}
+        if weld_result and "targetmap" in weld_result:
+            merged_vert_indices = {v.index for v in set(weld_result["targetmap"].values())}
+        else:
+            merged_vert_indices = set()
         bmesh.update_edit_mesh(joined.data)
 
         # Source meshes are frequently authored/imported with inconsistent
