@@ -185,7 +185,9 @@ class GenerateLODLevel(bpy.types.Operator):
 
         # The vertex group above only existed to steer this decimation pass;
         # drop it now so it doesn't linger as leftover data on the LOD mesh.
-        joined.vertex_groups.remove(seam_vgroup)
+        vgroup = joined.vertex_groups.get(self.SEAM_VERTEX_GROUP_NAME)
+        if vgroup is not None:
+            joined.vertex_groups.remove(vgroup)
 
         # The collapse operation above can leave a handful of degenerate/
         # flipped faces and always leaves flat per-face-loop normals (we
