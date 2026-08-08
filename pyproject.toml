@@ -1,8 +1,8 @@
 [project]
 name = "io_scene_mw"
-version = "0.8.120"
+version = "0.9.000"
 description = "Morrowind Blender Plugin"
-authors = [{ name = "Greatness7" }]
+authors = [{ name = "Greatness7" }, { name = "Erin Pentecost" }]
 dependencies = []
 requires-python = ">=3.11, <3.12"
 readme = "README.md"

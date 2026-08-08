@@ -8,6 +8,16 @@ class AlreadyHasLodError(Exception):
     """Raised when the imported NIF already contains a NiLODNode."""
 
 
+class TooFewVerticesError(Exception):
+    """Raised when the imported NIF has too few non-collision vertices to
+    be worth generating LOD levels for."""
+
+
+# NIFs with fewer non-collision vertices than this are skipped entirely -
+# meshes this small aren't worth the cost of generating LOD levels for.
+MIN_VERTEX_COUNT = 40
+
+
 def clear_scene():
     """Remove everything from the current Blender scene."""
     bpy.ops.object.mode_set(mode="OBJECT") if bpy.context.object and bpy.context.object.mode != "OBJECT" else None
@@ -87,6 +97,26 @@ def extract_nested_collision(root):
         collision.matrix_world = collision_world
 
     return collision_nodes
+
+
+def count_mesh_vertices(roots):
+    """
+    Count vertices across every mesh found anywhere under `roots`, however
+    deeply nested. Mesh data shared by more than one object (e.g. linked
+    duplicates) is only counted once.
+    """
+    seen_mesh_names = set()
+    total = 0
+
+    stack = list(roots)
+    while stack:
+        obj = stack.pop()
+        if obj.type == "MESH" and obj.data is not None and obj.data.name not in seen_mesh_names:
+            seen_mesh_names.add(obj.data.name)
+            total += len(obj.data.vertices)
+        stack.extend(obj.children)
+
+    return total
 
 
 def create_lod_container(roots):
@@ -221,6 +251,54 @@ def remove_existing_case_insensitive(output_path):
             existing.unlink()
 
 
+def _unquote_yaml_string(s):
+    """Remove surrounding quotes and unescape \\ and \"."""
+    if len(s) >= 2 and s[0] == '"' and s[-1] == '"':
+        s = s[1:-1]
+    return s.replace('\\\\', '\\').replace('\\"', '"')
+
+
+def parse_materials_yaml(yaml_path):
+    """
+    Parse the YAML output from list_materials.py and return a set of
+    absolute mesh paths that contain at least one transparent texture.
+    """
+    transparent_meshes = set()
+    current_mesh = None
+    has_transparent = False
+
+    for raw_line in yaml_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Mesh entry line: "path":  or  "path": []
+        if line.startswith('"'):
+            quoted = None
+            if line.endswith(': []'):
+                quoted = line[:-4]
+            elif line.endswith(':'):
+                quoted = line[:-1]
+
+            if quoted is not None:
+                if current_mesh is not None and has_transparent:
+                    transparent_meshes.add(current_mesh)
+
+                current_mesh = _unquote_yaml_string(quoted)
+                has_transparent = False
+                continue
+
+        # Texture transparency flag inside the current mesh's list
+        if line == 'transparent: true':
+            has_transparent = True
+
+    # Don't forget the last mesh in the file
+    if current_mesh is not None and has_transparent:
+        transparent_meshes.add(current_mesh)
+
+    return transparent_meshes
+
+
 def process_file(input_path, output_path, label=None):
     print()
     print("=" * 80)
@@ -239,6 +317,14 @@ def process_file(input_path, output_path, label=None):
     print(f"Non-collision roots ({len(sources)}):")
     for source in sources:
         print(f"  {source.name} (block type: {source.mw.block_type})")
+
+    vertex_count = count_mesh_vertices(sources)
+    print(f"Non-collision vertex count: {vertex_count}")
+    if vertex_count < MIN_VERTEX_COUNT:
+        print(f"Skipping: fewer than {MIN_VERTEX_COUNT} vertices.")
+        raise TooFewVerticesError(
+            f"{input_path.name} has only {vertex_count} vertices (< {MIN_VERTEX_COUNT})"
+        )
 
     container = create_lod_container(sources)
     print(f"Created LOD container: {container.name}")
@@ -268,7 +354,7 @@ def process_file(input_path, output_path, label=None):
 def main():
     # Blender arguments after "--":
     #
-    # blender --background --python batch_lod.py -- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN]
+    # blender --background --python gen_lod.py -- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN] [--materials-yaml YAML_PATH]
     #
     # GLOB_PATTERN is optional and matched relative to INPUT_DIR using
     # Path.rglob(), so it's implicitly prefixed with "**/". This lets you
@@ -276,13 +362,25 @@ def main():
     #   "*.nif"        -> all .nif files anywhere under INPUT_DIR (default)
     #   "sky/*.nif"    -> only .nif files directly inside any "sky" folder
     #   "sky/**/*.nif" -> .nif files anywhere under any "sky" folder
+    #
+    # --materials-yaml is optional. If given, any .nif file that the YAML
+    # indicates has at least one transparent texture is skipped entirely.
     args = sys.argv[sys.argv.index("--") + 1:]
+
+    # Extract --materials-yaml flag before positional arg validation
+    materials_yaml = None
+    if "--materials-yaml" in args:
+        idx = args.index("--materials-yaml")
+        if idx + 1 >= len(args):
+            raise SystemExit("--materials-yaml requires a path argument")
+        materials_yaml = Path(args[idx + 1]).resolve()
+        args = args[:idx] + args[idx + 2:]
 
     if len(args) not in (2, 3):
         raise SystemExit(
             "Usage:\n"
-            "  blender --background --python batch_lod.py "
-            "-- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN]"
+            "  blender --background --python gen_lod.py "
+            "-- INPUT_DIR OUTPUT_DIR [GLOB_PATTERN] [--materials-yaml YAML_PATH]"
         )
 
     input_dir = Path(args[0]).resolve()
@@ -308,10 +406,28 @@ def main():
     print(f"Glob pattern:     {glob_pattern}")
     print(f"Found {len(nif_files)} NIF files")
 
+    # Load transparent-material blocklist if provided
+    skip_meshes = set()
+    if materials_yaml is not None:
+        if not materials_yaml.is_file():
+            raise SystemExit(f"Materials YAML not found: {materials_yaml}")
+        skip_meshes = parse_materials_yaml(materials_yaml)
+        print(f"Materials YAML:   {materials_yaml}")
+        print(f"  {len(skip_meshes)} mesh(es) with transparent textures will be skipped")
+
     failures = []
     skipped = []
+    skipped_transparent = []
+    skipped_low_poly = []
 
     for input_path in nif_files:
+        # Skip meshes that contain transparent materials
+        if str(input_path.resolve()) in skip_meshes:
+            rel = input_path.relative_to(input_dir)
+            print(f"Skipping (transparent materials): {rel}")
+            skipped_transparent.append(input_path)
+            continue
+
         relative_path = input_path.relative_to(input_dir)
         output_path = output_dir / relative_path
 
@@ -322,6 +438,8 @@ def main():
             process_file(input_path, output_path, label=relative_path)
         except AlreadyHasLodError as exc:
             skipped.append((input_path, exc))
+        except TooFewVerticesError as exc:
+            skipped_low_poly.append((input_path, exc))
         except Exception as exc:
             print(
                 f"\nERROR processing {input_path.name}: "
@@ -333,13 +451,26 @@ def main():
     print("=" * 80)
     print("BATCH COMPLETE")
     print("=" * 80)
-    print(f"Processed: {len(nif_files) - len(failures) - len(skipped)}")
+    processed = len(nif_files) - len(failures) - len(skipped) - len(skipped_transparent) - len(skipped_low_poly)
+    print(f"Processed: {processed}")
     print(f"Skipped:   {len(skipped)} (already had a NiLODNode)")
+    print(f"Skipped:   {len(skipped_transparent)} (transparent materials)")
+    print(f"Skipped:   {len(skipped_low_poly)} (fewer than {MIN_VERTEX_COUNT} vertices)")
     print(f"Failed:    {len(failures)}")
 
     if skipped:
-        print("\nSkipped:")
+        print("\nSkipped (already had NiLODNode):")
         for path, exc in skipped:
+            print(f"  {path.relative_to(input_dir)}")
+
+    if skipped_transparent:
+        print("\nSkipped (transparent materials):")
+        for path in skipped_transparent:
+            print(f"  {path.relative_to(input_dir)}")
+
+    if skipped_low_poly:
+        print(f"\nSkipped (fewer than {MIN_VERTEX_COUNT} vertices):")
+        for path, exc in skipped_low_poly:
             print(f"  {path.relative_to(input_dir)}")
 
     if failures:
