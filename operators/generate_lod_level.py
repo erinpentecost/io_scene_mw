@@ -28,12 +28,12 @@ class GenerateLODLevel(bpy.types.Operator):
     # them fully protected (their edges never collapse), 1.0 gives them no
     # special treatment at all and lets them decimate like any other vertex.
     # See the vertex group setup in create_level() for how this is applied.
-    SEAM_VERTEX_WEIGHT = 0.1
+    SEAM_VERTEX_WEIGHT = 0.9
     # Effective Decimate-modifier weight given to a non-seam vertex whose
     # surrounding surface is dead vertical (e.g. a wall face-on). This
     # rises linearly to 1.0 (no special treatment) as that surface
     # approaches horizontal (e.g. a floor or roof) - see create_level().
-    PLANE_WEIGHT_VERTICAL = 0.75
+    PLANE_WEIGHT_VERTICAL = 0.2
     # A cell is 8192 units wide.
     LOD_STEP = 3500.0
     MAX_DIST = 3.4028235e38
@@ -169,14 +169,18 @@ class GenerateLODLevel(bpy.types.Operator):
         normal_matrix = joined.matrix_world.to_3x3().inverted_safe().transposed()
 
         for v in bm.verts:
+            weight = 1.0
+
             if v.index in merged_vert_indices:
                 weight = self.SEAM_VERTEX_WEIGHT
-            else:
-                world_normal = (normal_matrix @ v.normal).normalized()
-                verticality = abs(world_normal.z)
-                weight = self.PLANE_WEIGHT_VERTICAL + (
-                    (1.0 - self.PLANE_WEIGHT_VERTICAL) * verticality
-                )
+
+            world_normal = (normal_matrix @ v.normal).normalized()
+            verticality = abs(world_normal.z)
+            weight = weight * (self.PLANE_WEIGHT_VERTICAL + (
+                (1.0 - self.PLANE_WEIGHT_VERTICAL) * verticality
+            ))
+
+            weight = round(weight, 1)
             v[deform_layer][weight_group.index] = weight
 
         bmesh.update_edit_mesh(joined.data)
