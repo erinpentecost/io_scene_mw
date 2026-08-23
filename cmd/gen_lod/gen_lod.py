@@ -17,6 +17,11 @@ class TooFewVerticesError(Exception):
 # meshes this small aren't worth the cost of generating LOD levels for.
 MIN_VERTEX_COUNT = 40
 
+# NIFs with fewer non-collision vertices than this only get one generated
+# LOD level instead of two - a second, more aggressive decimation pass has
+# little to offer on something this small, and just adds export bloat.
+SINGLE_LOD_VERTEX_THRESHOLD = 100
+
 
 def clear_scene():
     """Remove everything from the current Blender scene."""
@@ -201,12 +206,12 @@ def generate_lod_level(container):
         )
 
 
-def generate_lods(container):
-    print("Generating LOD level 1...")
-    generate_lod_level(container)
+def generate_lods(container, vertex_count):
+    levels = 1 if vertex_count < SINGLE_LOD_VERTEX_THRESHOLD else 2
 
-    print("Generating LOD level 2...")
-    generate_lod_level(container)
+    for level in range(1, levels + 1):
+        print(f"Generating LOD level {level}...")
+        generate_lod_level(container)
 
 
 def export_nif(filepath):
@@ -329,7 +334,7 @@ def process_file(input_path, output_path, label=None):
     container = create_lod_container(sources)
     print(f"Created LOD container: {container.name}")
 
-    generate_lods(container)
+    generate_lods(container, vertex_count)
 
     print("LOD hierarchy:")
     for level in container.children:

@@ -20,16 +20,20 @@ class GenerateLODLevel(bpy.types.Operator):
     # vertices along seams between joined source meshes before decimation.
     # Tune this if seams still show gaps/holes after welding.
     MERGE_DISTANCE = 0.0001
-    # Vertex group used internally to bias the Decimate modifier toward
-    # protecting the vertices produced by the seam weld above (see
-    # create_level()). Created fresh for each LOD level and removed again
-    # once that level's decimation is applied.
-    SEAM_VERTEX_GROUP_NAME = "mw_lod_seam"
+    # Vertex group used internally to bias the Decimate modifier on a
+    # per-vertex basis (see create_level()). Created fresh for each LOD
+    # level and removed again once that level's decimation is applied.
+    DECIMATE_WEIGHT_GROUP_NAME = "mw_lod_weights"
     # Effective Decimate-modifier weight given to seam vertices: 0.0 leaves
     # them fully protected (their edges never collapse), 1.0 gives them no
     # special treatment at all and lets them decimate like any other vertex.
     # See the vertex group setup in create_level() for how this is applied.
-    SEAM_VERTEX_WEIGHT = 0.1
+    SEAM_VERTEX_WEIGHT = 0.9
+    # Effective Decimate-modifier weight given to a non-seam vertex whose
+    # surrounding surface is dead vertical (e.g. a wall face-on). This
+    # rises linearly to 1.0 (no special treatment) as that surface
+    # approaches horizontal (e.g. a floor or roof) - see create_level().
+    PLANE_WEIGHT_VERTICAL = 0.1
     # A cell is 8192 units wide.
     LOD_STEP = 3500.0
     MAX_DIST = 3.4028235e38
@@ -131,10 +135,61 @@ class GenerateLODLevel(bpy.types.Operator):
         # winding order relative to one another (e.g. mirrored parts from a
         # NIF import). After joining, this leaves some faces flipped, which
         # by itself looks like "messed up normals" and also throws off the
-        # decimator (it uses face normals to decide which edges to collapse).
-        # Recalculate a globally consistent winding before decimating.
+        # decimator (it uses face normals to decide which edges to collapse)
+        # and, below, the per-vertex normals used to weight decimation
+        # against vertical surfaces. Recalculate a globally consistent
+        # winding before either of those happens.
         bpy.ops.mesh.normals_make_consistent(inside=False)
+
+        # Build a vertex group that steers the Decimate modifier below on a
+        # per-vertex basis:
+        #
+        #   - Seam vertices (welded above) get SEAM_VERTEX_WEIGHT: what
+        #     matters most for them is holding the seam together, so
+        #     nothing else here should override that.
+        #   - Every other vertex is weighted by how vertical the surface
+        #     around it is, from PLANE_WEIGHT_VERTICAL (dead vertical, e.g.
+        #     a wall) up to 1.0 / no special treatment (dead horizontal,
+        #     e.g. a floor or roof). Walls tend to read as more obviously
+        #     "wrong" once simplified than floors/roofs do, so nudging the
+        #     decimator away from them - without fully protecting them the
+        #     way seams are - tends to give a better result for the same
+        #     triangle budget.
+        #
+        # We use each vertex's own (interpolated) normal as a stand-in for
+        # the orientation of the surface around it, transformed into world
+        # space since "vertical" is a world-space notion and this object's
+        # local axes aren't guaranteed to line up with it.
+        bm = bmesh.from_edit_mesh(joined.data)
+        bm.verts.ensure_lookup_table()
+        bm.normal_update()
+
+        weight_group = joined.vertex_groups.new(name=self.DECIMATE_WEIGHT_GROUP_NAME)
+        deform_layer = bm.verts.layers.deform.verify()
+        normal_matrix = joined.matrix_world.to_3x3().inverted_safe().transposed()
+
+        for v in bm.verts:
+            weight = 1.0
+
+            if v.index in merged_vert_indices:
+                weight = self.SEAM_VERTEX_WEIGHT
+
+            world_normal = (normal_matrix @ v.normal).normalized()
+            flatness = abs(world_normal.z)
+            weight = weight * (self.PLANE_WEIGHT_VERTICAL + (
+                (1.0 - self.PLANE_WEIGHT_VERTICAL) * flatness
+            ))
+
+            weight = round(weight, 1)
+            v[deform_layer][weight_group.index] = weight
+
+        bmesh.update_edit_mesh(joined.data)
         bpy.ops.object.mode_set(mode="OBJECT")
+
+        print(
+            f"LOD level {level + 1}: "
+            f"retaining {len(merged_vert_indices)} welded seam vertices through decimation"
+        )
 
         # The Decimate modifier's edge-collapse algorithm does not correctly
         # interpolate custom split normals (the per-face-corner normals used
@@ -143,29 +198,6 @@ class GenerateLODLevel(bpy.types.Operator):
         # artifacts on the simplified mesh. Instead, drop them here and
         # rebuild clean smoothing after decimating, below.
         bpy.ops.mesh.customdata_custom_splitnormals_clear()
-
-        # Put the welded seam vertices in their own vertex group so the
-        # Decimate modifier below can be biased to protect them.
-        #
-        # The Decimate modifier treats any vertex that is *not* a member of
-        # its vertex group as having an implicit weight of 0.0, and a weight
-        # of 0.0 on either endpoint makes that edge un-collapsible. Rather
-        # than explicitly weighting every single vertex in the mesh, we take
-        # advantage of that default: put only the (typically much smaller)
-        # set of seam vertices into the group, then turn on the modifier's
-        # "Invert Vertex Group" option so the meaning flips - seam vertices
-        # (in the group) end up with SEAM_VERTEX_WEIGHT, and every other
-        # vertex (not in the group, inverted from its implicit 0.0) ends up
-        # with a full 1.0, decimating normally.
-        seam_vgroup = joined.vertex_groups.new(name=self.SEAM_VERTEX_GROUP_NAME)
-        if merged_vert_indices:
-            seam_vgroup.add(
-                list(merged_vert_indices), 1.0 - self.SEAM_VERTEX_WEIGHT, "REPLACE"
-            )
-        print(
-            f"LOD level {level + 1}: "
-            f"retaining {len(merged_vert_indices)} welded seam vertices through decimation"
-        )
 
         # Count triangles before decimation for debugging.
         depsgraph = context.evaluated_depsgraph_get()
@@ -179,13 +211,12 @@ class GenerateLODLevel(bpy.types.Operator):
         # decimate
         modifier = joined.modifiers.new(name="Decimate", type="DECIMATE")
         modifier.ratio = ratio
-        modifier.vertex_group = seam_vgroup.name
-        modifier.invert_vertex_group = True
+        modifier.vertex_group = weight_group.name
         bpy.ops.object.modifier_apply(modifier=modifier.name)
 
         # The vertex group above only existed to steer this decimation pass;
         # drop it now so it doesn't linger as leftover data on the LOD mesh.
-        vgroup = joined.vertex_groups.get(self.SEAM_VERTEX_GROUP_NAME)
+        vgroup = joined.vertex_groups.get(self.DECIMATE_WEIGHT_GROUP_NAME)
         if vgroup is not None:
             joined.vertex_groups.remove(vgroup)
 
