@@ -33,7 +33,7 @@ class GenerateLODLevel(bpy.types.Operator):
     # surrounding surface is dead vertical (e.g. a wall face-on). This
     # rises linearly to 1.0 (no special treatment) as that surface
     # approaches horizontal (e.g. a floor or roof) - see create_level().
-    PLANE_WEIGHT_VERTICAL = 0.2
+    PLANE_WEIGHT_VERTICAL = 0.1
     # A cell is 8192 units wide.
     LOD_STEP = 3500.0
     MAX_DIST = 3.4028235e38
@@ -175,9 +175,9 @@ class GenerateLODLevel(bpy.types.Operator):
                 weight = self.SEAM_VERTEX_WEIGHT
 
             world_normal = (normal_matrix @ v.normal).normalized()
-            verticality = abs(world_normal.z)
+            flatness = abs(world_normal.z)
             weight = weight * (self.PLANE_WEIGHT_VERTICAL + (
-                (1.0 - self.PLANE_WEIGHT_VERTICAL) * verticality
+                (1.0 - self.PLANE_WEIGHT_VERTICAL) * flatness
             ))
 
             weight = round(weight, 1)
