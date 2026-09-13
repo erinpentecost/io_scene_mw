@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from es3.utils.flags import bool_property
-from es3.utils.math import decompose_uniform, zeros
+from es3.utils.math import ID44, decompose_uniform, zeros
 from .NiAVObject import NiAVObject
 
+import numpy as np
 import numpy.linalg as la
 
 

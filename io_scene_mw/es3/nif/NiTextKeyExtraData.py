@@ -72,40 +72,6 @@ class NiTextKeyExtraData(NiExtraData):
                     group_name = line[:-6]
                     start_index = i
 
-    def expand_groups(self):
-        temp = []
-        seen = {}
-
-        for time, text in self.keys.tolist():
-            for line in filter(None, text.splitlines()):
-                lowercased = line.lower()
-                if (lowercased in seen) and ("sound" not in lowercased):
-                    print(f"Skipped duplicate text key '{line}' at {time:.3f}. Previous at {seen[lowercased]:.3f}.")
-                    continue
-
-                seen[lowercased] = time
-                temp.append((time, line))
-
-        self.keys = np.array(temp, dtype=_dtype)
-
-    def collapse_groups(self):
-        uniques, inverse = np.unique(self.times, return_inverse=True)
-        if len(uniques) == len(self.keys):
-            return
-
-        new_keys = np.empty(len(uniques), _dtype)
-
-        for i, time in enumerate(uniques.tolist()):
-            # list of all the strings for this timing
-            # TODO: use hash map here for performance
-            strings = self.values[inverse == i].tolist()
-            # split strings to clean up extraneous newlines
-            cleaned = [s for s in strings for s in s.splitlines() if s]
-            # re-join the strings and update the keys array
-            new_keys[i] = time, "\r\n".join(cleaned)
-
-        self.keys = new_keys
-
     def apply_time_scale(self, scale: float):
         super().apply_time_scale(scale)
         if len(self.keys):

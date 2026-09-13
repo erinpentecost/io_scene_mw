@@ -238,6 +238,7 @@ class Importer:
         """ TODO
             support for multiple skeleton roots
         """
+        print(f"[DEBUG resolve_armatures] armatures keys={list(self.armatures.keys())}")
         orphan_bones = self.armatures.pop(None, {})
 
         # sort roots via heirarchy
@@ -292,8 +293,13 @@ class Importer:
             node.matrix_posed = node.matrix_world
 
         # send all bones to rest pose
+        print(f"[DEBUG resolve_armatures] calling apply_bone_bind_poses on {root.name}")
         root.apply_bone_bind_poses()
+        print(f"[DEBUG resolve_armatures] calling apply_skins on {root.name}, has apply_skins={hasattr(root, 'apply_skins')}, attr={type(getattr(root, 'apply_skins', None))}")
+        print('method func', root.apply_skins.__func__)
+        print('method func code file', root.apply_skins.__func__.__code__.co_filename)
         root.apply_skins(keep_skins=True)
+        print("[DEBUG resolve_armatures] apply_skins returned")
 
         # apply updated rest matrices
         for node in self.iter_bones(root_node):
@@ -323,11 +329,17 @@ class Importer:
 
         # calculate corrected transformation matrix
         t, r, s = decompose(root_bone.matrix_posed)
-        r = nif_utils.snap_rotation(r)
-        corrected_matrix = compose(t, r, s)
+        r_snapped = nif_utils.snap_rotation(r)
+        corrected_matrix = compose(t, r_snapped, s)
 
         # only do corrections if they are necessary
         if np.allclose(root_bone.matrix_world, corrected_matrix, rtol=0, atol=1e-6):
+            return
+
+        # Only snap the root rotation if it is already close to a 90 degree
+        # alignment. Arbitrary skeletons (e.g. imported from other formats)
+        # should keep their original rest pose to preserve round-trip fidelity.
+        if not np.allclose(r, r_snapped, rtol=0, atol=0.2):
             return
 
         # correct the rest matrix of skinned meshes
@@ -761,10 +773,41 @@ class Armature(SceneNode):
             # edit_bones will not persist outside of edit mode
             bones[node] = bone.name
 
-            if bone.children:
-                # calculate length from children mean location
-                locations = [c.matrix_posed[:3, 3] for c in node.children if c in bones]
-                bone.length = la.norm(node.matrix_posed[:3, 3] - np.mean(locations, axis=0))
+            # Calculate the length from the child node most closely aligned
+            # with the bone's Y axis.  The exporter points the bone's Y axis
+            # at the child that continues the skeleton (the Blender tail),
+            # so bone tails survive a round trip: the tail child sits on
+            # the Y axis, while attachment nodes (weapon_*, dust_*, ...)
+            # usually do not.  Picking the furthest child instead would
+            # overshoot the tail whenever such an attachment hangs further
+            # out along the limb.  Children coincident with the head carry
+            # no direction and are skipped — mc2importer's ASE import uses
+            # the same 1 mm cutoff when picking a tail target.
+            locations = [
+                c.matrix_world[:3, 3]
+                for c in node.children
+                if isinstance(c.source, nif.NiNode)
+            ]
+            if locations:
+                head = node.matrix_posed[:3, 3]
+                y_axis = node.matrix_world[:3, 1]
+                y_norm = la.norm(y_axis)
+                candidates = [
+                    (dist, loc - head)
+                    for loc in locations
+                    if (dist := la.norm(loc - head)) > 1e-3
+                ]
+                if candidates and y_norm > 1e-8:
+                    y_axis = y_axis / y_norm
+
+                    def y_deviation(item):
+                        dist, offset = item
+                        return 1.0 - float(np.dot(offset, y_axis)) / dist
+
+                    bone.length = min(candidates, key=y_deviation)[0]
+                elif bone.parent:
+                    # set length to half of the parent bone length
+                    bone.length = bone.parent.length / 2
             elif bone.parent:
                 # set length to half of the parent bone length
                 bone.length = bone.parent.length / 2

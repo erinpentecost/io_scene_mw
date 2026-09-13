@@ -105,16 +105,45 @@ class NiStream:
                 # merge duplicate properties
                 obj.properties[i] = ensure_unique(prop)
 
-    def extract_keyframe_data(self) -> NiStream:
-        """Extract animation data. Useful for generating 'x.nif' and 'x.kf' files."""
+    def discard_text_keys(self) -> list:
+        """Remove every NiTextKeyExtraData block from the stream.
 
-        # extract text data
+        Returns the discarded blocks in traversal order.  Text keys must not
+        survive in an animation-free xNIF, and stray copies are easy to create
+        (e.g. one per exported action), so all of them are collected.
+        """
+        removed = []
         for obj in self.objects_of_type(nif.NiObjectNET):
-            text_data = obj.extra_datas.discard_type(nif.NiTextKeyExtraData)
-            if text_data:
-                break
-        else:
-            raise ValueError("extract_keyframe_data: no NiTextKeyExtraData object was found.")
+            while True:
+                text_data = obj.extra_datas.discard_type(nif.NiTextKeyExtraData)
+                if text_data is None:
+                    break
+                removed.append(text_data)
+        return removed
+
+    def extract_keyframe_data(self, allow_empty=False) -> NiStream:
+        """Extract animation data. Useful for generating 'x.nif' and 'x.kf' files.
+
+        The KF uses the vanilla Morrowind/OpenMW ``NiSequenceStreamHelper``
+        layout: the first extra-data record is the ``NiTextKeyExtraData`` and
+        is not paired with a controller.  Every ``NiKeyframeController`` is
+        paired with one ``NiStringExtraData`` whose string is the name of the
+        NIF node targeted by that controller, and the string records are
+        chained in the same order as the controller records.  No extra-data
+        name is emitted for an armature/root object unless that node is
+        itself one of the animation targets.
+        """
+
+        # extract text data; the xNIF keeps no copy
+        text_data = next(iter(self.discard_text_keys()), None)
+
+        if text_data is None:
+            if not allow_empty:
+                raise ValueError(
+                    "extract_keyframe_data: no NiTextKeyExtraData object was found. "
+                    "Add pose markers to the exported action (e.g. 'Idle: Start' and 'Idle: Stop')."
+                )
+            text_data = nif.NiTextKeyExtraData()
 
         # extract controllers
         kf_controllers = {}
@@ -133,20 +162,14 @@ class NiStream:
         # create x.kf output
         output = nif.NiStream()
 
-        # assign root object
+        # The text keys are the first extra-data record; the per-target
+        # NiStringExtraData records follow, one per controller, in the same
+        # order as the controllers they name.
         output.root = nif.NiSequenceStreamHelper(extra_data=text_data)
 
-        # assign controllers
-        extra_datas = []
-        controllers = []
-
         for target, controller in kf_controllers.items():
-            extra_data = nif.NiStringExtraData(string_data=target.name)
-            extra_datas.append(extra_data)
-            controllers.append(controller)
-
-        output.root.extra_datas.extend(extra_datas)
-        output.root.controllers.extend(controllers)
+            output.root.extra_datas.append(nif.NiStringExtraData(string_data=target.name))
+            output.root.controllers.append(controller)
 
         return output
 
@@ -158,10 +181,30 @@ class NiStream:
             raise ValueError("attach_keyframe_data: kf_data root must be a NiSequenceStreamHelper")
 
         kf_text_data, *kf_string_datas = kf_root.extra_datas
-        assert len(kf_string_datas) >= 1
+        if not kf_string_datas:
+            # KF with no controller targets — nothing to attach.
+            return
+
+        # The vanilla/OpenMW layout chains one NiStringExtraData per
+        # NiKeyframeController in controller order, with the NiTextKeyExtraData
+        # first and unpaired, so the string records are either exactly as
+        # numerous as the controllers (vanilla) or one more (older exports
+        # that prepended the skeleton root).  The first string names the node
+        # that receives the text keys; in the vanilla layout that is simply
+        # the first controller target.
+        num_controllers = len(list(kf_root.controllers))
+        if len(kf_string_datas) == num_controllers:
+            # Vanilla layout: the first controller target doubles as the
+            # text-key owner.
+            skeleton_root_name = kf_string_datas[0].string_data
+            controller_strings = kf_string_datas
+        else:
+            # Legacy format: the first entry is the skeleton root, the rest
+            # are controller targets.
+            skeleton_root_name = kf_string_datas[0].string_data
+            controller_strings = kf_string_datas[1:]
 
         # find the skeleton root node
-        skeleton_root_name = kf_string_datas[0].string_data
         skeleton_root = self.find_object_by_name(skeleton_root_name)
         if skeleton_root is None:
             raise ValueError(f"attach_keyframe_data: unable to find skeleton root {skeleton_root_name}")
@@ -171,7 +214,7 @@ class NiStream:
 
         # collect controllers/targets
         controllers_to_attach: dict[str, nif.NiKeyframeController] = {
-            s.string_data: c for s, c in zip(kf_string_datas, kf_root.controllers)
+            s.string_data: c for s, c in zip(controller_strings, kf_root.controllers)
         }
 
         # merge controllers into target objects of self

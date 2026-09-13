@@ -40,12 +40,18 @@ class NiNode(NiAVObject):
         self.children.sort(key=key)
 
     def skinned_meshes(self):
+        print(f"[DEBUG skinned_meshes] searching descendants of {self.name}")
         for mesh in self.descendants():
+            print(f"[DEBUG skinned_meshes] descendant {mesh.__class__.__name__} {getattr(mesh,'name','')} skin={getattr(mesh, 'skin', None)}")
             if getattr(mesh, "skin", None):
                 yield mesh
 
     def apply_skins(self, keep_skins=False):
-        for mesh in self.skinned_meshes():
+        print(f"[DEBUG apply_skins] self={self}, children={len(getattr(self,'children',[]))}")
+        skins = list(self.skinned_meshes())
+        print(f"[DEBUG apply_skins] found {len(skins)} skinned meshes")
+        for mesh in skins:
+            print(f"[DEBUG apply_skins] applying to {mesh.name}")
             mesh.apply_skin(keep_skins)
 
     def calc_bone_bind_poses(self):

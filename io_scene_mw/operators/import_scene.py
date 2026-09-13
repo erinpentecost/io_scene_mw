@@ -55,7 +55,12 @@ class ImportScene(bpy.types.Operator, ImportHelper):
 
     ignore_collision_nodes: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
     ignore_custom_normals: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
-    ignore_animations: bpy.props.BoolProperty(default=False, options={"HIDDEN"})
+
+    ignore_animations: bpy.props.BoolProperty(
+        name="Ignore Animations",
+        description="Skip importing animation data (keyframes, morphs, vis controllers, etc.)",
+        default=False,
+    )
 
     @classmethod
     def poll(cls, context):
