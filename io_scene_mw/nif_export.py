@@ -3,6 +3,7 @@ import bpy
 import timeit
 import pathlib
 import collections
+import re
 
 import numpy as np
 import numpy.linalg as la
@@ -61,10 +62,11 @@ class Exporter:
         self.colliders = collections.defaultdict(set)
         self.depsgraph = None
 
+
     def execute(self):
         bl_objects = self.get_source_objects()
 
-        # resolve heirarchy
+        # resolve hierarchy
         roots = self.resolve_nodes(bl_objects)
 
         # resolve armatures
@@ -79,29 +81,54 @@ class Exporter:
         for root in roots:
             root.ensure_uniform_scale()
 
-        # create ni objects
-        for node, cls in self.nodes.items():
-            if node.output is None:
-                cls(node).create()
-                node.animation.create()
+        # Create static NIF data once. Bone animation is sampled separately.
+        frame_current = bpy.context.scene.frame_current
+        try:
+            for node, cls in self.nodes.items():
+                if node.output is None:
+                    cls(node).create()
+                    node.animation.create()
+        finally:
+            bpy.context.scene.frame_current = frame_current
 
         # finalize lod levels
         for node in self.nodes:
             if isinstance(node.output, nif.NiLODNode):
                 self.finalize_lod_node(node)
 
+        actions = self.resolve_actions_to_export()
+
+        batch_export = (
+            self.export_animations
+            and self.extract_keyframe_data
+            and self.export_all_actions
+            and len(actions) > 1
+        )
+
+        # In the normal path, build bone controllers before get_root_output()
+        # so its animation-node detection sees them just as it did before the
+        # multi-action refactor.
+        if not batch_export:
+            self.animate_bones(actions[0] if actions else None)
+
         data = nif.NiStream()
         data.root = self.get_root_output(roots)
+
+        # Apply global corrections to the static graph. Batch-created bone
+        # controllers are corrected individually in export_action_keyframe_variants.
         data.apply_scale(self.scale_correction)
         data.apply_time_scale(1 / bpy.context.scene.render.fps)
         data.merge_properties(ignore={"name", "shine", "specular_color"})
         data.sort()
-        self.setup_markers(data)
-        data.save(self.filepath)
 
-        # extract x/kf file
-        if self.extract_keyframe_data:
-            self.export_keyframe_data(data)
+        if batch_export:
+            self.export_action_keyframe_variants(data, actions)
+        else:
+            self.setup_markers(data)
+            data.save(self.filepath)
+
+            if self.extract_keyframe_data:
+                self.export_keyframe_data(data)
 
     # -------
     # RESOLVE
@@ -145,23 +172,36 @@ class Exporter:
                     node.matrix_world = np.array(node.source.matrix_world)
 
     def apply_axis_corrections(self):
-        """ TODO
-            support multiple armatures
-            only apply on 'Bip01' nodes
+        """Apply axis corrections to bone rest poses.
+
+        After ``resolve_armatures`` each bone's ``matrix_world`` is its
+        Blender rest-pose world matrix.  We apply the per-bone axis
+        correction here so that ``matrix_local`` becomes the rest-pose local
+        matrix in NIF coordinates.  This is the matrix written to each
+        ``NiNode`` and used as the reference for skinning.
+
+        Animation data is sampled separately from the evaluated pose; the
+        current pose is not baked into the skeleton hierarchy.
         """
         root_node = self.get(*self.armatures)
         root_matrix = root_node.matrix_world
         root_inverse = la.inv(root_matrix)
 
+        # Capture every bone's uncorrected Blender world matrix up front.
+        # The ``matrix_world`` getter composes the parent's *current* world,
+        # so reading it while correcting would return matrices that already
+        # contain the parent's correction (and thus accumulate one stray
+        # correction per hierarchy level).
+        blender_worlds = {
+            node: node.matrix_world.copy()
+            for node in self.iter_bones(root_node)
+        }
+
         for node in self.iter_bones(root_node):
-            prev_matrix_local = node.matrix_local.copy()
+            node.matrix_world = blender_worlds[node] @ node.axis_correction
 
-            node.matrix_bind = root_inverse @ node.matrix_world @ node.axis_correction
-            node.matrix_world = root_matrix @ node.source.matrix @ node.axis_correction
-
-            inverse_transform = la.solve(node.matrix_local, prev_matrix_local)
-            for child in node.children:
-                child.matrix_local = inverse_transform @ child.matrix_local
+            # Bind matrix used by NiSkinData (bone space -> skin space).
+            node.matrix_bind = root_inverse @ node.matrix_world
 
     def resolve_depsgraph(self):
         temp_modifiers = []
@@ -224,12 +264,314 @@ class Exporter:
 
         node.output.lod_levels = np.array(lod_levels, dtype="<f").reshape(-1, 2)
 
+
     def export_keyframe_data(self, data):
         nif_path = self.filepath
         xnif_path = nif_path.with_name("x" + nif_path.name)
         xkf_path = xnif_path.with_suffix(".kf")
+
+        if not any(data.objects_of_type(nif.NiKeyframeController)):
+            raise ValueError(
+                "extract_keyframe_data: no keyframe animation data was found. "
+                "Ensure the armature or object has an action assigned."
+            )
+
         data.extract_keyframe_data().save(xkf_path)
         data.save(xnif_path)
+
+    @staticmethod
+    def _action_fcurves(action):
+        if action is None:
+            return ()
+
+        if bpy.app.version >= (5, 0, 0):
+            from bpy_extras import anim_utils
+
+            fcurves = []
+            for slot in action.slots:
+                channelbag = anim_utils.action_get_channelbag_for_slot(action, slot)
+                if channelbag is not None:
+                    fcurves.extend(channelbag.fcurves)
+            return fcurves
+
+        return action.fcurves
+
+    def resolve_actions_to_export(self):
+        if not self.armatures:
+            try:
+                return [bpy.context.object.animation_data.action]
+            except AttributeError:
+                return []
+
+        armature_object, *_ = self.armatures
+        try:
+            current_action = armature_object.animation_data.action
+        except AttributeError:
+            current_action = None
+
+        if not self.extract_keyframe_data or not self.export_all_actions:
+            return [current_action] if current_action is not None else []
+
+        bone_names = {bone.name for bone in armature_object.data.bones}
+        prefixes = {f'pose.bones["{name}"].' for name in bone_names}
+
+        actions = []
+        for action in bpy.data.actions:
+            if not action.mw.batch_export:
+                continue
+
+            if any(
+                fc.data_path.startswith(prefix)
+                for fc in self._action_fcurves(action)
+                for prefix in prefixes
+            ):
+                actions.append(action)
+
+        return actions
+
+    def assign_action(self, armature_object, action, slot=None):
+        anim_data = armature_object.animation_data_create()
+        anim_data.action = action
+
+        if not hasattr(anim_data, "action_slot"):
+            return
+
+        if action is None:
+            # Assigning None to the Action clears the slot automatically in
+            # Blender 5.x.  Setting action_slot afterwards raises:
+            # "Cannot set slot without an assigned Action."
+            return
+
+        if slot is None:
+            from bpy_extras import anim_utils
+            slot = anim_utils.action_get_first_suitable_slot(
+                action, armature_object.id_type
+            )
+            if slot is None and len(action.slots):
+                slot = action.slots[0]
+
+        anim_data.action_slot = slot
+
+    def pose_bone_nodes(self):
+        if not self.armatures:
+            return ()
+
+        armature_object, *_ = self.armatures
+        armature_node = self.get(armature_object)
+        return tuple(self.iter_bones(armature_node))
+
+    def animate_bones(self, action):
+        if not self.export_animations or action is None or not self.armatures:
+            return
+
+        armature_object, *_ = self.armatures
+        self.assign_action(armature_object, action)
+        bone_frames, cache = self.sample_pose_bones(action)
+
+        for node in self.pose_bone_nodes():
+            node.animation.build_keyframe_controller(bone_frames, cache)
+
+    def sample_pose_bones(self, action):
+        armature_object, *_ = self.armatures
+        fcurves_dict = Animation.get_fcurves_dict(armature_object)
+        pose_bones = armature_object.pose.bones
+        bone_names = {bone.name for bone in pose_bones}
+        channels = ("location", "rotation_quaternion", "rotation_euler", "scale")
+        warned_bones = set()
+
+        for data_path in fcurves_dict:
+            prefix = 'pose.bones["'
+            marker = '"].'
+            if not data_path.startswith(prefix):
+                continue
+
+            end = data_path.find(marker, len(prefix))
+            if end < 0:
+                continue
+
+            bone_name = data_path[len(prefix):end]
+            channel = data_path[end + len(marker):].split(".", 1)[0]
+            if channel not in channels:
+                continue
+
+            if bone_name not in bone_names and bone_name not in warned_bones:
+                warned_bones.add(bone_name)
+                print(
+                    f"[WARN] action '{action.name}' animates missing bone "
+                    f"'{bone_name}' — skipped"
+                )
+
+        bone_frames = {}
+        for bone in pose_bones:
+            frames = set()
+            for channel in channels:
+                data_path = f'pose.bones["{bone.name}"].{channel}'
+                for fc in fcurves_dict.get(data_path, ()):
+                    frames.update(kp.co[0] for kp in fc.keyframe_points)
+
+            if frames:
+                bone_frames[bone.name] = frames
+
+        cache = {}
+        all_frames = sorted(set().union(*bone_frames.values())) if bone_frames else []
+        scene = bpy.context.scene
+
+        for frame in all_frames:
+            scene.frame_set(int(frame), subframe=frame - int(frame))
+            self.depsgraph.update()
+            evaluated = armature_object.evaluated_get(self.depsgraph)
+            cache[frame] = {
+                pb.name: (
+                    la.solve(
+                        np.asarray(pb.parent.matrix, dtype="<f"),
+                        np.asarray(pb.matrix, dtype="<f"),
+                    )
+                    if pb.parent
+                    else np.asarray(pb.matrix, dtype="<f")
+                )
+                for pb in evaluated.pose.bones
+            }
+
+        return bone_frames, cache
+
+    def export_action_keyframe_variants(self, data, actions):
+        """Export all selected Blender Actions into one Morrowind x.kf pair.
+
+        The ordinary NIF is written before animation controllers are extracted.
+        Every Blender Action is placed on a single contiguous timeline, with its
+        pose markers shifted by the same amount.  The resulting controllers and
+        text keys are extracted once, producing exactly:
+
+            <name>.nif
+            x<name>.nif
+            x<name>.kf
+        """
+        armature_object, *_ = self.armatures
+        anim_data = armature_object.animation_data_create()
+        orig_action = anim_data.action
+        orig_slot = getattr(anim_data, "action_slot", None)
+
+        skeleton_root = next(
+            (
+                skin.root
+                for skin in data.objects_of_type(nif.NiSkinInstance)
+                if skin.root
+            ),
+            None,
+        )
+
+        nif_path = self.filepath
+        xnif_path = nif_path.with_name("x" + nif_path.name)
+        xkf_path = xnif_path.with_suffix(".kf")
+
+        # Text keys belong in the x.kf only.  Drop the ones that were
+        # attached from the currently assigned action when the static graph
+        # was created, so neither the static NIF nor the xNIF keeps a copy.
+        data.discard_text_keys()
+
+        # Save the ordinary static NIF before extraction mutates the graph.
+        data.save(nif_path)
+
+        merged_text_keys = []
+        timeline = 0.0
+
+        try:
+            for action in actions:
+                self.assign_action(armature_object, action)
+
+                bone_frames, cache = self.sample_pose_bones(action)
+                if not bone_frames:
+                    print(
+                        f"[WARN] action '{action.name}': "
+                        "no bone animation found, skipped"
+                    )
+                    continue
+
+                action_start, action_end = map(float, action.frame_range)
+                duration = max(action_end - action_start, 1.0)
+                time_offset = timeline - action_start
+                output_start = timeline
+                output_end = timeline + duration
+
+                for node in self.pose_bone_nodes():
+                    node.animation.build_keyframe_controller(
+                        bone_frames, cache, time_offset=time_offset
+                    )
+
+                markers = getattr(action, "pose_markers", ())
+                if markers:
+                    for marker in markers:
+                        # every text key gets its own record, even when a
+                        # single marker carries several "; "-separated keys
+                        time = float(marker.frame) + time_offset
+                        merged_text_keys.extend(
+                            (time, key)
+                            for key in marker.name.replace("; ", "\r\n").splitlines()
+                            if key
+                        )
+                else:
+                    # Actions in legacy Blender files may have no markers.
+                    # Give them the standard Morrowind start/stop pair so the
+                    # combined KF still exposes a named animation group.
+                    merged_text_keys.extend(
+                        (
+                            (output_start, f"{action.name} start"),
+                            (output_end, f"{action.name} stop"),
+                        )
+                    )
+
+                timeline = output_end + 1.0
+
+            controllers = []
+            for node in self.pose_bone_nodes():
+                controller = node.output.controllers.find_type_with_owner(
+                    nif.NiKeyframeController
+                )
+                if controller is not None:
+                    _, controller = controller
+                    controller.data.apply_scale(self.scale_correction)
+                    controller.apply_time_scale(1 / bpy.context.scene.render.fps)
+                    controller.data.apply_time_scale(1 / bpy.context.scene.render.fps)
+                    controllers.append(controller)
+
+            if not controllers:
+                raise ValueError(
+                    "extract_keyframe_data: no keyframe animation data was found "
+                    "for any selected action."
+                )
+
+            text_data = nif.NiTextKeyExtraData()
+            if merged_text_keys:
+                text_data.keys = np.array(
+                    merged_text_keys,
+                    dtype=text_data.keys.dtype,
+                )
+                text_data.keys.sort(order="f0", kind="stable")
+                # the controllers were scaled to seconds above; the text
+                # keys have to use the same units
+                text_data.apply_time_scale(1 / bpy.context.scene.render.fps)
+
+            # Put the combined text keys on the armature/skeleton object.
+            if skeleton_root is not None:
+                skeleton_node = data.find_object_by_name(skeleton_root.name)
+            else:
+                skeleton_node = data.root
+            skeleton_node.extra_datas.appendleft(text_data)
+
+            kf = data.extract_keyframe_data()
+            kf.save(xkf_path)
+
+            # Extraction is destructive by design, leaving the animation-free
+            # xNIF that Morrowind expects alongside the KF.
+            data.save(xnif_path)
+        finally:
+            self.assign_action(armature_object, orig_action, orig_slot)
+
+    @staticmethod
+    def sanitize_filename(name):
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+        name = name.strip(" .")
+        return name or "action"
 
     # -------
     # PROCESS
@@ -331,9 +673,13 @@ class Exporter:
 
         if needs_animation_node:
             # if conditions are met we can update in-place rather than using a wrapper
-            in_place =  type(root) is nif.NiNode and root.name not in ("Bip01", "Root Bone")
-            kwargs = root.asdict() if in_place else dict(name=file_name, children=[root])
-            root = nif.NiBSAnimationNode(**kwargs)
+            in_place = type(root) is nif.NiNode and root.name not in ("Bip01", "Root Bone")
+            if in_place:
+                # Mutate the existing NiNode into a NiBSAnimationNode so that
+                # existing references (e.g. NiSkinInstance.root) remain valid.
+                root.__class__ = nif.NiBSAnimationNode
+            else:
+                root = nif.NiBSAnimationNode(name=file_name, children=[root])
             root.animated = True
             root.not_random = not self.randomize_animations
 
@@ -557,7 +903,8 @@ class SceneNode:
 
     @property
     def block_type(self):
-        if self.source.type == "RootCollisionNode":
+        source_type = getattr(self.source, "type", None)
+        if source_type == "RootCollisionNode":
             return RootCollisionNodeBlockType()
         if self.is_collider:
             return CollisionMeshBlockType()
@@ -658,7 +1005,6 @@ class Armature(SceneNode):
         for node in self.exporter.iter_bones(self):
             Empty(node).create()
             node.output.name = node.bone_name
-            node.animation.create()
 
 
 class Mesh(SceneNode):
@@ -1287,9 +1633,11 @@ class Animation(SceneNode):
         if not self.exporter.export_animations:
             return
 
-        # create text keys even if no animations are assigned
-        # this is necessary as text keys are specified on the
-        # file root and will influence all descending objects
+        # Pose-bone animation is sampled separately so one depsgraph evaluation
+        # can serve every keyed bone at a frame.
+        if isinstance(self.source, bpy.types.PoseBone):
+            return
+
         self.create_text_keys()
 
         fcurves_dict = self.get_fcurves_dict(self.source.id_data)
@@ -1301,7 +1649,79 @@ class Animation(SceneNode):
         self.create_rotations(fcurves_dict)
         self.create_scales(fcurves_dict)
 
+    def build_keyframe_controller(self, bone_frames, cache, time_offset=0.0):
+        if not isinstance(self.source, bpy.types.PoseBone):
+            return None
+
+        frames = bone_frames.get(self.source.name)
+        if not frames:
+            return None
+
+        if self.parent and isinstance(self.parent.source, bpy.types.PoseBone):
+            parent_axis_correction_inverse = self.parent.axis_correction_inverse
+        else:
+            parent_axis_correction_inverse = ID44
+
+        loc_keys = []
+        rot_keys = []
+        scale_keys = []
+
+        for frame in sorted(frames):
+            local_matrix = cache[frame][self.source.name]
+            local_matrix = (
+                parent_axis_correction_inverse
+                @ local_matrix
+                @ self.axis_correction
+            )
+
+            translation, rotation, scale = decompose(local_matrix)
+            if not np.allclose(scale[:1], scale[1:], rtol=0, atol=1e-4):
+                print(f"[INFO] {self.name} has non-uniform scale animation")
+
+            quat = nif_utils.quaternion_from_matrix(rotation)
+
+            out_frame = frame + time_offset
+            loc_keys.append((out_frame, *translation))
+            rot_keys.append((out_frame, *quat))
+            scale_keys.append((out_frame, scale[0]))
+
+        controller = self.create_keyframe_controller()
+
+        def append_keys(data, keys, rotation=False):
+            if not keys:
+                return
+            new = np.asarray(keys, dtype=np.float32)
+            old = getattr(data, "keys", np.empty((0, new.shape[1]), dtype=np.float32))
+            if len(old):
+                old = np.asarray(old, dtype=np.float32)
+                if rotation and np.dot(new[0, 1:5], old[-1, 1:5]) < 0:
+                    new[:, 1:5] *= -1
+                data.keys = np.concatenate((old, new))
+            else:
+                data.keys = new
+
+        if loc_keys:
+            controller.data.translations.key_type = nif.NiFloatData.KeyType.LIN_KEY
+            append_keys(controller.data.translations, loc_keys)
+
+        if rot_keys:
+            controller.data.rotations.key_type = nif.NiRotData.KeyType.LIN_KEY
+            append_keys(controller.data.rotations, rot_keys, rotation=True)
+
+        if scale_keys:
+            controller.data.scales.key_type = nif.NiFloatData.KeyType.LIN_KEY
+            append_keys(controller.data.scales, scale_keys)
+
+        start, stop = controller.data.get_start_stop_times()
+        controller.start_time = start
+        controller.stop_time = stop
+        return controller
+
     def create_text_keys(self):
+        # Replace any previous text-key extra data safely; batch export calls
+        # this once per action on the same static NIF graph.
+        self.output.extra_datas.discard_type(nif.NiTextKeyExtraData)
+
         try:
             markers = self.source.animation_data.action.pose_markers
         except AttributeError:
@@ -1311,17 +1731,24 @@ class Animation(SceneNode):
             return False
 
         text_data = nif.NiTextKeyExtraData()
-        text_data.keys.resize(len(markers))
 
-        for i, marker in enumerate(markers):
-            time = marker.frame
-            name = marker.name.replace("; ", "\r\n")
-            text_data.keys[i] = time, name
+        keys = []
+        for marker in markers:
+            # every text key gets its own record, even when several share a
+            # time or a single marker carries "; "-separated keys
+            keys.extend(
+                (marker.frame, key)
+                for key in marker.name.replace("; ", "\r\n").splitlines()
+                if key
+            )
 
-        text_data.collapse_groups()
-        text_data.keys.sort()
+        if not keys:
+            return False
 
-        self.output.extra_data = text_data
+        text_data.keys = np.array(keys, dtype=text_data.keys.dtype)
+        text_data.keys.sort(order="f0", kind="stable")
+
+        self.output.extra_datas.appendleft(text_data)
 
         return True
 
@@ -1686,7 +2113,7 @@ class Animation(SceneNode):
         if bpy.app.version >= (5, 0, 0):
             from bpy_extras import anim_utils
             channelbag = anim_utils.animdata_get_channelbag_for_assigned_slot(anim_data)
-            return channelbag.fcurves
+            return channelbag.fcurves if channelbag is not None else ()
         return anim_data.action.fcurves
 
     @staticmethod
@@ -1728,7 +2155,15 @@ class Animation(SceneNode):
             group_name = fcurves[0].group.name
             action = self.source.id_data.animation_data.action
             for i in set(range(num_axes)).difference(fc.array_index for fc in fcurves):
-                fc = action.fcurves.new(data_path, index=i, action_group=group_name)
+                if bpy.app.version >= (5, 0, 0):
+                    from bpy_extras import anim_utils
+                    anim_data = self.source.id_data.animation_data
+                    channelbag = anim_utils.animdata_get_channelbag_for_assigned_slot(anim_data)
+                    fc = channelbag.fcurves.ensure(
+                        data_path, index=i, group_name=group_name
+                    )
+                else:
+                    fc = action.fcurves.new(data_path, index=i, action_group=group_name)
 
         # fill in missing keyframes
         scene = bpy.context.scene

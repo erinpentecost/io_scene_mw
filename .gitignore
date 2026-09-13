@@ -1,7 +1,11 @@
 ignore/
+smoke_output/
 *.lock
 __pycache__/
 .idea/
 venv/
-*.nif
 *.zip
+*.kf
+*.nif
+*.blend
+notes/BizarreMorrowindAnimatonUtilities-main/

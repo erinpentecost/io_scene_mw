@@ -135,6 +135,8 @@ class MarkersPanel(bpy.types.Panel):
 
         self.layout.prop(space_data, "show_pose_markers", text="Show Text Keys")
 
+        self.layout.prop(action.mw, "batch_export")
+
         # Markers List
         row = self.layout.row()
         row.template_list("DOPESHEET_UL_MW_MarkersList", "", action, "pose_markers", action, "active_pose_marker_index")

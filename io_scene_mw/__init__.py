@@ -15,8 +15,13 @@ bl_info = {
     "category": "Import-Export",
 }
 
-# Make /lib/ modules accessible to python scripts.
-lib = os.path.join(os.path.dirname(__file__), "lib")
+# Make bundled libraries importable: es3 lives next to this file, and any
+# legacy helpers live in ./lib.
+package_dir = os.path.dirname(__file__)
+if package_dir not in sys.path:
+    sys.path.append(package_dir)
+
+lib = os.path.join(package_dir, "lib")
 if lib not in sys.path:
     sys.path.append(lib)
 

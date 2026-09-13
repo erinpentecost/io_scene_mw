@@ -60,6 +60,12 @@ class ExportScene(bpy.types.Operator, ExportHelper):
         default=False,
     )
 
+    export_all_actions: bpy.props.BoolProperty(
+        name="Export All Actions",
+        description="Export every enabled action that contains animation for a bone in the exported armature",
+        default=False,
+    )
+
     preserve_root_tranforms: bpy.props.BoolProperty(
         name="Preserve Root Transforms",
         description=(
